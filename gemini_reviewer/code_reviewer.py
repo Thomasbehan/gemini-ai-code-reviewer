@@ -241,11 +241,17 @@ class CodeReviewer:
         
         file_comments = []
         
-        # Create analysis context
+        # Detect related files and gather project context
+        related_files = await self._detect_related_files(diff_file, pr_details)
+        project_context = await self._build_project_context(diff_file, related_files, pr_details)
+        
+        # Create enhanced analysis context with project understanding
         context = AnalysisContext(
             pr_details=pr_details,
             file_info=diff_file.file_info,
-            language=self.diff_parser.get_file_language(file_path)
+            language=self.diff_parser.get_file_language(file_path),
+            related_files=related_files,
+            project_context=project_context
         )
         
         # Get prompt template based on configuration
@@ -280,6 +286,135 @@ class CodeReviewer:
         
         logger.debug(f"Generated {len(file_comments)} comments for {file_path}")
         return file_comments
+    
+    async def _detect_related_files(self, diff_file: DiffFile, pr_details: PRDetails) -> List[str]:
+        """Detect related files based on imports and dependencies."""
+        file_path = diff_file.file_info.path
+        related_files = []
+        
+        try:
+            # Extract imports/requires/includes from the file content
+            import_patterns = {
+                'python': [r'from\s+(\S+)\s+import', r'import\s+(\S+)'],
+                'javascript': [r'import\s+.*\s+from\s+["\']([^"\']+)["\']', r'require\(["\']([^"\']+)["\']\)'],
+                'typescript': [r'import\s+.*\s+from\s+["\']([^"\']+)["\']', r'require\(["\']([^"\']+)["\']\)'],
+                'java': [r'import\s+([^;]+);'],
+                'go': [r'import\s+["\']([^"\']+)["\']', r'import\s+\(\s*["\']([^"\']+)["\']'],
+                'ruby': [r'require\s+["\']([^"\']+)["\']'],
+            }
+            
+            language = self.diff_parser.get_file_language(file_path)
+            
+            if language and language.lower() in import_patterns:
+                import re
+                patterns = import_patterns[language.lower()]
+                
+                # Analyze the hunk content for imports
+                for hunk in diff_file.hunks:
+                    for line in hunk.lines:
+                        # Only look at added or context lines, not deleted lines
+                        if line.startswith('-'):
+                            continue
+                        
+                        clean_line = line[1:] if line else line  # Remove +/- prefix
+                        
+                        for pattern in patterns:
+                            matches = re.findall(pattern, clean_line)
+                            for match in matches:
+                                # Convert import path to file path
+                                related_file = self._import_to_file_path(match, file_path, language)
+                                if related_file and related_file not in related_files:
+                                    related_files.append(related_file)
+            
+            # Limit to most relevant files to avoid token bloat
+            related_files = related_files[:5]
+            
+            if related_files:
+                logger.info(f"Detected {len(related_files)} related files for {file_path}")
+            
+        except Exception as e:
+            logger.debug(f"Error detecting related files for {file_path}: {str(e)}")
+        
+        return related_files
+    
+    def _import_to_file_path(self, import_path: str, current_file: str, language: str) -> Optional[str]:
+        """Convert an import path to a file path."""
+        try:
+            import os
+            
+            # Handle relative imports
+            if import_path.startswith('.'):
+                current_dir = os.path.dirname(current_file)
+                # Count leading dots
+                dots = len(import_path) - len(import_path.lstrip('.'))
+                # Go up directories
+                for _ in range(dots - 1):
+                    current_dir = os.path.dirname(current_dir)
+                import_path = import_path.lstrip('.')
+                base_path = os.path.join(current_dir, import_path.replace('.', '/'))
+            else:
+                # For absolute imports, try common patterns
+                base_path = import_path.replace('.', '/')
+            
+            # Add appropriate extensions based on language
+            extensions = {
+                'python': ['.py', '/__init__.py'],
+                'javascript': ['.js', '/index.js', '.jsx'],
+                'typescript': ['.ts', '/index.ts', '.tsx'],
+                'java': ['.java'],
+                'go': ['.go'],
+                'ruby': ['.rb']
+            }
+            
+            possible_paths = []
+            if language.lower() in extensions:
+                for ext in extensions[language.lower()]:
+                    possible_paths.append(base_path + ext)
+            
+            # Return the first plausible path
+            return possible_paths[0] if possible_paths else None
+            
+        except Exception:
+            return None
+    
+    async def _build_project_context(self, diff_file: DiffFile, related_files: List[str], pr_details: PRDetails) -> Optional[str]:
+        """Build project context by fetching related file contents."""
+        if not related_files:
+            return None
+        
+        context_parts = []
+        max_context_size = 8000  # Limit total context to avoid token bloat
+        current_size = 0
+        
+        try:
+            for related_file in related_files:
+                if current_size >= max_context_size:
+                    break
+                
+                # Try to fetch the file content from the base branch
+                content = self.github_client.get_file_content(
+                    pr_details.owner,
+                    pr_details.repo,
+                    related_file,
+                    pr_details.base_sha or 'main'
+                )
+                
+                if content:
+                    # Limit individual file size
+                    if len(content) > 2000:
+                        content = content[:2000] + "\n... (truncated)"
+                    
+                    context_parts.append(f"### Related file: {related_file}\n```\n{content}\n```\n")
+                    current_size += len(content)
+            
+            if context_parts:
+                logger.info(f"Built project context with {len(context_parts)} related files ({current_size} chars)")
+                return "\n".join(context_parts)
+                
+        except Exception as e:
+            logger.debug(f"Error building project context: {str(e)}")
+        
+        return None
     
     def _convert_to_review_comment(
         self,
@@ -318,7 +453,8 @@ class CodeReviewer:
     async def _create_github_review(self, pr_details: PRDetails, comments: List[ReviewComment]) -> bool:
         """Create GitHub review with comments."""
         try:
-            logger.info(f"Creating GitHub review with {len(comments)} comments...")
+            total_comments = len(comments)
+            logger.info(f"Creating GitHub review with {total_comments} total comments...")
             
             # Filter comments by priority if configured
             filtered_comments = self._filter_comments_by_priority(comments)
@@ -327,19 +463,28 @@ class CodeReviewer:
             # Note: Using COMMENT instead of APPROVE because GitHub Actions tokens
             # are not permitted to approve pull requests (GitHub API restriction)
             if not filtered_comments:
-                logger.info("No comments to report - posting positive review")
-                event = "COMMENT"
+                if total_comments > 0:
+                    logger.info(f"All {total_comments} comments were filtered by priority threshold - posting comment about this")
+                    event = "COMMENT"
+                else:
+                    logger.info("No comments generated - posting positive review")
+                    event = "COMMENT"
             else:
-                logger.info(f"Found {len(filtered_comments)} comments - requesting changes")
+                logger.info(f"Found {len(filtered_comments)} comments (out of {total_comments} total) - requesting changes")
                 event = "REQUEST_CHANGES"
             
-            # Always create a review, even if there are no comments
-            success = self.github_client.create_review(pr_details, filtered_comments, event)
+            # Pass both total and filtered comments so summary can be accurate
+            success = self.github_client.create_review(
+                pr_details, 
+                filtered_comments, 
+                event,
+                total_comments_generated=total_comments
+            )
             if success:
                 if filtered_comments:
                     logger.info("✅ Successfully created GitHub review with change requests")
                 else:
-                    logger.info("✅ Successfully posted positive review with no issues found")
+                    logger.info("✅ Successfully posted review")
             
             return success
             

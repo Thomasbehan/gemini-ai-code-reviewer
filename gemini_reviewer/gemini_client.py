@@ -153,7 +153,7 @@ class GeminiClient:
         context: AnalysisContext,
         prompt_template: str
     ) -> str:
-        """Create a comprehensive analysis prompt."""
+        """Create a comprehensive analysis prompt with project context."""
         # Sanitize inputs
         sanitized_content = self._sanitize_code_content(hunk.content)
         sanitized_title = self._sanitize_text(context.pr_details.title)
@@ -170,13 +170,21 @@ class GeminiClient:
             context_info.append("Note: This is a test file")
         
         if context.related_files:
-            context_info.append(f"Related files: {', '.join(context.related_files[:3])}")
+            context_info.append(f"Related files detected: {', '.join(context.related_files)}")
         
         context_string = "\n".join(context_info) if context_info else ""
         
-        # Build the complete prompt
+        # Build the complete prompt with enhanced instructions
         prompt_parts = [
             prompt_template,
+            "",
+            "IMPORTANT: You are reviewing code with access to related files for HOLISTIC analysis.",
+            "Consider:",
+            "- How this code interacts with related files and dependencies",
+            "- Project-wide patterns, architectural concerns, and maintainability",
+            "- Potential bugs that only appear when considering the broader codebase",
+            "- Security implications across the entire data flow",
+            "- Performance issues that may not be obvious from the diff alone",
             "",
             f"Pull request title: {sanitized_title}",
             "Pull request description:",
@@ -188,8 +196,25 @@ class GeminiClient:
         
         if context_string:
             prompt_parts.extend([
-                "Context:",
+                "File Context:",
                 context_string,
+                ""
+            ])
+        
+        # Add project context if available (related file contents)
+        if context.project_context:
+            prompt_parts.extend([
+                "Project Context (Related Files):",
+                "---",
+                context.project_context,
+                "---",
+                "",
+                "Use the above related files to understand how this code fits into the larger project.",
+                "Look for:",
+                "- Incorrect usage of APIs or functions defined in related files",
+                "- Violations of patterns established in the codebase",
+                "- Missing error handling based on how related code behaves",
+                "- Type mismatches or contract violations",
                 ""
             ])
         
