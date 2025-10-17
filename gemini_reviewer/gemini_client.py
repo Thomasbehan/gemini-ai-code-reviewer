@@ -331,33 +331,72 @@ class GeminiClient:
             return None
     
     def _clean_response_text(self, response_text: str) -> str:
-        """Clean the response text from common formatting issues."""
+        """Clean the response text from common formatting issues and extract JSON.
+        
+        This method handles cases where the AI adds conversational text before/after the JSON,
+        despite instructions to output only JSON. It searches for and extracts the JSON object.
+        """
         cleaned = response_text.strip()
         
-        # Remove markdown code block markers (handle various formats)
-        # Handle ```json at the start
-        if cleaned.startswith('```json'):
-            cleaned = cleaned[7:].lstrip()
-        # Handle ```JSON (uppercase)
-        elif cleaned.startswith('```JSON'):
-            cleaned = cleaned[7:].lstrip()
-        # Handle ``` followed by newline
-        elif cleaned.startswith('```\n'):
-            cleaned = cleaned[4:]
-        # Handle ``` followed by any whitespace
-        elif cleaned.startswith('```'):
-            # Find the end of the opening marker (could be ```json\n or just ```\n)
-            first_newline = cleaned.find('\n')
-            if first_newline != -1:
-                cleaned = cleaned[first_newline + 1:]
-            else:
-                cleaned = cleaned[3:].lstrip()
+        # First, try to remove markdown code block markers if present
+        if '```' in cleaned:
+            # Remove opening markdown block
+            if cleaned.startswith('```json'):
+                cleaned = cleaned[7:].lstrip()
+            elif cleaned.startswith('```JSON'):
+                cleaned = cleaned[7:].lstrip()
+            elif cleaned.startswith('```\n'):
+                cleaned = cleaned[4:]
+            elif cleaned.startswith('```'):
+                first_newline = cleaned.find('\n')
+                if first_newline != -1:
+                    cleaned = cleaned[first_newline + 1:]
+                else:
+                    cleaned = cleaned[3:].lstrip()
+            
+            # Remove closing ``` markers
+            if cleaned.endswith('```'):
+                cleaned = cleaned[:-3].rstrip()
         
-        # Remove closing ``` markers
-        if cleaned.endswith('```'):
-            cleaned = cleaned[:-3].rstrip()
+        # Now extract JSON even if there's conversational text before/after it
+        # Find the first '{' which should be the start of our JSON object
+        json_start = cleaned.find('{')
+        if json_start == -1:
+            # No JSON object found
+            logger.warning("No JSON object (opening brace) found in response")
+            return cleaned
         
-        return cleaned.strip()
+        # Find the matching closing '}' by counting braces
+        brace_count = 0
+        json_end = -1
+        for i in range(json_start, len(cleaned)):
+            if cleaned[i] == '{':
+                brace_count += 1
+            elif cleaned[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i
+                    break
+        
+        if json_end == -1:
+            # No matching closing brace found
+            logger.warning("No matching closing brace found for JSON object")
+            return cleaned
+        
+        # Extract just the JSON portion
+        json_text = cleaned[json_start:json_end + 1]
+        
+        # Log if we had to strip conversational text
+        if json_start > 0:
+            stripped_prefix = cleaned[:json_start].strip()
+            logger.info(f"Stripped conversational prefix from response: {stripped_prefix[:100]}...")
+        
+        if json_end < len(cleaned) - 1:
+            stripped_suffix = cleaned[json_end + 1:].strip()
+            if stripped_suffix:
+                logger.info(f"Stripped conversational suffix from response: {stripped_suffix[:100]}...")
+        
+        return json_text.strip()
     
     def _parse_priority(self, priority_value: Any) -> ReviewPriority:
         """Parse priority from AI response."""
