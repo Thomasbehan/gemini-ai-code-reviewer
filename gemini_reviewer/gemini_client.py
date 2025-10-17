@@ -8,6 +8,7 @@ prompt engineering, response validation, and error handling.
 import json
 import logging
 import time
+import re
 from typing import List, Dict, Any, Optional
 import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -53,6 +54,8 @@ class GeminiClient:
             "max_output_tokens": config.max_output_tokens,
             "temperature": config.temperature,
             "top_p": config.top_p,
+            # Force the model to emit JSON only, reducing chances of conversational wrappers
+            "response_mime_type": "application/json",
         }
         
         # Statistics tracking
@@ -279,6 +282,34 @@ class GeminiClient:
             logger.error(f"Raw response length: {len(response_text)}")
             logger.error(f"Raw response preview: {response_text[:500]}...")
             logger.error(f"Cleaned response preview: {cleaned_response[:500] if 'cleaned_response' in locals() else 'N/A'}...")
+
+            # Fallback: try to extract a valid JSON object from the raw response
+            fallback_json_text = self._extract_valid_json_object(response_text)
+            if fallback_json_text:
+                try:
+                    data = json.loads(fallback_json_text)
+                    logger.info("Recovered by extracting a valid JSON object from the response")
+
+                    if not isinstance(data, dict) or "reviews" not in data:
+                        logger.warning("Recovered JSON doesn't contain 'reviews' field")
+                        return []
+
+                    reviews = data.get("reviews", [])
+                    if not isinstance(reviews, list):
+                        logger.warning("Recovered JSON 'reviews' field is not a list")
+                        return []
+
+                    ai_responses = []
+                    for review in reviews:
+                        ai_response = self._parse_single_review(review)
+                        if ai_response:
+                            ai_responses.append(ai_response)
+
+                    logger.info(f"Successfully parsed {len(ai_responses)} AI responses (fallback path)")
+                    return ai_responses
+                except Exception as inner_e:
+                    logger.error(f"Fallback JSON extraction also failed: {str(inner_e)}")
+
             return []
         except Exception as e:
             logger.error(f"Error parsing AI response: {str(e)}")
@@ -397,6 +428,83 @@ class GeminiClient:
                 logger.info(f"Stripped conversational suffix from response: {stripped_suffix[:100]}...")
         
         return json_text.strip()
+
+    def _extract_valid_json_object(self, text: str) -> Optional[str]:
+        """Attempt to extract a valid JSON object that contains reviews from free-form text.
+        Strategy:
+        1) Prefer fenced ```json code blocks
+        2) Otherwise, collect all balanced brace segments and try to parse them
+           prioritizing segments that contain "\"reviews\"".
+        """
+        if not text:
+            return None
+        raw = text.strip()
+
+        # 1) Look for fenced json blocks first
+        try:
+            code_fence_pattern = re.compile(r"```(?:json|JSON)\s*(\{[\s\S]*?\})\s*```", re.MULTILINE)
+            matches = list(code_fence_pattern.finditer(raw))
+            for m in matches:
+                candidate = m.group(1).strip()
+                try:
+                    data = json.loads(candidate)
+                    if isinstance(data, dict) and "reviews" in data:
+                        logger.info("Using JSON extracted from ```json fenced block")
+                        return candidate
+                except Exception:
+                    continue
+        except Exception:
+            # Regex failure shouldn't break parsing
+            pass
+
+        # 2) Collect balanced brace segments
+        segments = self._collect_balanced_brace_segments(raw)
+        if not segments:
+            return None
+
+        # Prioritize segments that contain the expected top-level key
+        def sort_key(seg: str):
+            return ("\"reviews\"" not in seg, -len(seg))
+        segments.sort(key=sort_key)
+
+        for seg in segments:
+            # Quick sanity: JSON must start with '{' and contain quotes
+            if not seg.startswith('{'):
+                continue
+            if '"' not in seg:
+                # Avoid obvious non-JSON like Go structs { Field Type }
+                continue
+            try:
+                data = json.loads(seg)
+                if isinstance(data, dict) and "reviews" in data:
+                    logger.info("Recovered valid JSON by scanning balanced braces in response")
+                    return seg
+            except Exception:
+                continue
+
+        return None
+
+    def _collect_balanced_brace_segments(self, text: str) -> List[str]:
+        """Collect all top-level balanced brace substrings from text.
+        Returns a list of substrings that start with '{' and end with the matching '}'.
+        """
+        segments: List[str] = []
+        brace_count = 0
+        start_idx: Optional[int] = None
+        for i, ch in enumerate(text):
+            if ch == '{':
+                if brace_count == 0:
+                    start_idx = i
+                brace_count += 1
+            elif ch == '}':
+                if brace_count > 0:
+                    brace_count -= 1
+                    if brace_count == 0 and start_idx is not None:
+                        # Extract segment
+                        segment = text[start_idx:i+1]
+                        segments.append(segment)
+                        start_idx = None
+        return segments
     
     def _parse_priority(self, priority_value: Any) -> ReviewPriority:
         """Parse priority from AI response."""
