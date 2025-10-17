@@ -192,7 +192,7 @@ class Config:
         gemini_config = GeminiConfig(
             api_key=gemini_api_key,
             model_name=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-            temperature=float(os.environ.get("GEMINI_TEMPERATURE", "0.2")),  # Lower for precise code reviews
+            temperature=float(os.environ.get("GEMINI_TEMPERATURE", "0.0")),  # Lower for precise code reviews
             top_p=float(os.environ.get("GEMINI_TOP_P", "0.9")),  # Lower for more focused output
             max_output_tokens=int(os.environ.get("GEMINI_MAX_TOKENS", "8192"))
         )

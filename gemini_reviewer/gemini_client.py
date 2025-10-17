@@ -231,7 +231,9 @@ class GeminiClient:
         return "\n".join(prompt_parts)
     
     def _parse_ai_response(self, response_text: str) -> List[AIResponse]:
-        """Parse AI response and validate the structure."""
+        """Parse AI response and validate the structure.
+        Accepts both object-with-'reviews' and top-level list schemas.
+        """
         try:
             # Log raw response details for debugging
             logger.debug(f"Raw response length: {len(response_text)} characters")
@@ -254,22 +256,42 @@ class GeminiClient:
                 logger.error(f"Raw response was: {response_text[:500]}...")
                 return []
             
-            # Parse JSON
+            # Parse JSON (can be dict or list)
             data = json.loads(cleaned_response)
             logger.debug("Successfully parsed JSON response from Gemini")
             
-            if not isinstance(data, dict) or "reviews" not in data:
-                logger.warning("Response doesn't contain 'reviews' field")
+            reviews_list: Optional[List[Dict[str, Any]]] = None
+            
+            if isinstance(data, dict):
+                # Standard path
+                if "reviews" in data and isinstance(data["reviews"], list):
+                    reviews_list = data["reviews"]
+                else:
+                    # Accept alternate top-level keys commonly used by LLMs
+                    alt_keys = ["comments", "findings", "issues", "items", "results", "reviewComments"]
+                    for k in alt_keys:
+                        if k in data and isinstance(data[k], list):
+                            logger.info(f"Parsed reviews from alternate top-level key: '{k}'")
+                            reviews_list = data[k]
+                            break
+                    # If still none, maybe the object itself represents a single review item
+                    if reviews_list is None:
+                        logger.warning("Response JSON object lacks 'reviews' (or alternates); attempting single-item parse")
+                        reviews_list = [data]
+            elif isinstance(data, list):
+                logger.info("Parsed reviews from top-level JSON array")
+                reviews_list = data
+            else:
+                logger.warning(f"Unexpected JSON root type: {type(data)}")
                 return []
             
-            reviews = data.get("reviews", [])
-            if not isinstance(reviews, list):
-                logger.warning("Reviews field is not a list")
+            if not reviews_list:
+                logger.warning("No review items found after schema normalization")
                 return []
             
             # Convert to AIResponse objects
-            ai_responses = []
-            for review in reviews:
+            ai_responses: List[AIResponse] = []
+            for review in reviews_list:
                 ai_response = self._parse_single_review(review)
                 if ai_response:
                     ai_responses.append(ai_response)
@@ -283,24 +305,32 @@ class GeminiClient:
             logger.error(f"Raw response preview: {response_text[:500]}...")
             logger.error(f"Cleaned response preview: {cleaned_response[:500] if 'cleaned_response' in locals() else 'N/A'}...")
 
-            # Fallback: try to extract a valid JSON object from the raw response
-            fallback_json_text = self._extract_valid_json_object(response_text)
+            # Fallback: try to extract a valid JSON object or array from the raw response
+            fallback_json_text = self._extract_valid_json_segment(response_text)
             if fallback_json_text:
                 try:
                     data = json.loads(fallback_json_text)
-                    logger.info("Recovered by extracting a valid JSON object from the response")
+                    logger.info("Recovered by extracting a valid JSON segment from the response")
 
-                    if not isinstance(data, dict) or "reviews" not in data:
-                        logger.warning("Recovered JSON doesn't contain 'reviews' field")
+                    reviews_list: Optional[List[Dict[str, Any]]] = None
+                    if isinstance(data, dict):
+                        if "reviews" in data and isinstance(data["reviews"], list):
+                            reviews_list = data["reviews"]
+                        else:
+                            for k in ["comments", "findings", "issues", "items", "results", "reviewComments"]:
+                                if k in data and isinstance(data[k], list):
+                                    logger.info(f"Recovered reviews from alternate key '{k}' in fallback JSON")
+                                    reviews_list = data[k]
+                                    break
+                            if reviews_list is None:
+                                reviews_list = [data]
+                    elif isinstance(data, list):
+                        reviews_list = data
+                    else:
                         return []
 
-                    reviews = data.get("reviews", [])
-                    if not isinstance(reviews, list):
-                        logger.warning("Recovered JSON 'reviews' field is not a list")
-                        return []
-
-                    ai_responses = []
-                    for review in reviews:
+                    ai_responses: List[AIResponse] = []
+                    for review in reviews_list:
                         ai_response = self._parse_single_review(review)
                         if ai_response:
                             ai_responses.append(ai_response)
@@ -317,37 +347,78 @@ class GeminiClient:
             return []
     
     def _parse_single_review(self, review: Dict[str, Any]) -> Optional[AIResponse]:
-        """Parse a single review from the AI response."""
+        """Parse a single review from the AI response.
+        Accepts multiple field name variants from different response schemas.
+        """
         try:
             if not isinstance(review, dict):
                 logger.warning(f"Invalid review format: {type(review)}")
                 return None
             
-            # Validate required fields
-            if "lineNumber" not in review or "reviewComment" not in review:
-                logger.warning(f"Review missing required fields: {review}")
+            # Normalize line number field
+            line_keys = [
+                "lineNumber", "line", "ln", "line_no", "lineIndex", "position", "pos"
+            ]
+            line_number: Optional[int] = None
+            for k in line_keys:
+                if k in review:
+                    try:
+                        ln_val = review[k]
+                        # Sometimes it can be 1-based index in string form
+                        line_number = int(str(ln_val).strip())
+                        break
+                    except Exception:
+                        continue
+            if not line_number or line_number <= 0:
+                logger.warning(f"Review missing or invalid line number field: keys tried {line_keys}; review keys: {list(review.keys())}")
                 return None
             
-            # Parse and validate line number
-            try:
-                line_number = int(review["lineNumber"])
-                if line_number <= 0:
-                    logger.warning(f"Invalid line number: {line_number}")
-                    return None
-            except (ValueError, TypeError):
-                logger.warning(f"Invalid line number format: {review.get('lineNumber')}")
-                return None
-            
-            # Get and sanitize comment
-            comment = self._sanitize_text(str(review["reviewComment"]))
+            # Normalize comment/message field
+            comment_keys = [
+                "reviewComment", "comment", "message", "finding", "text", "body", "description"
+            ]
+            comment: Optional[str] = None
+            for k in comment_keys:
+                if k in review and review[k] is not None:
+                    comment = str(review[k])
+                    break
             if not comment or len(comment.strip()) == 0:
-                logger.warning("Empty review comment")
+                logger.warning("Empty review comment after normalization")
                 return None
+            comment = self._sanitize_text(comment)
             
-            # Parse optional fields
-            priority = self._parse_priority(review.get("priority"))
-            category = review.get("category")
-            confidence = self._parse_confidence(review.get("confidence"))
+            # Optional: priority/severity/level
+            priority_val = None
+            for k in ["priority", "severity", "level", "rating"]:
+                if k in review:
+                    priority_val = review[k]
+                    break
+            priority = self._parse_priority(priority_val)
+            
+            # Optional: category/tag/label/type
+            category_val = None
+            for k in ["category", "tag", "label", "type", "area"]:
+                if k in review:
+                    category_val = review[k]
+                    break
+            category = category_val
+            
+            # Optional: confidence/score/probability
+            confidence_val = None
+            for k in ["confidence", "score", "probability", "likelihood"]:
+                if k in review:
+                    confidence_val = review[k]
+                    break
+            confidence = self._parse_confidence(confidence_val)
+            
+            # Handle percentage-like confidences (>1.0 up to 100)
+            if confidence is None and confidence_val is not None:
+                try:
+                    c = float(confidence_val)
+                    if c > 1.0 and c <= 100.0:
+                        confidence = max(0.0, min(1.0, c / 100.0))
+                except Exception:
+                    pass
             
             return AIResponse(
                 line_number=line_number,
@@ -362,10 +433,10 @@ class GeminiClient:
             return None
     
     def _clean_response_text(self, response_text: str) -> str:
-        """Clean the response text from common formatting issues and extract JSON.
+        """Clean the response text from common formatting issues and extract JSON or JSON array.
         
         This method handles cases where the AI adds conversational text before/after the JSON,
-        despite instructions to output only JSON. It searches for and extracts the JSON object.
+        despite instructions to output only JSON. It searches for and extracts the JSON object or array.
         """
         cleaned = response_text.strip()
         
@@ -389,67 +460,92 @@ class GeminiClient:
             if cleaned.endswith('```'):
                 cleaned = cleaned[:-3].rstrip()
         
-        # Now extract JSON even if there's conversational text before/after it
-        # Find the first '{' which should be the start of our JSON object
-        json_start = cleaned.find('{')
-        if json_start == -1:
-            # No JSON object found
-            logger.warning("No JSON object (opening brace) found in response")
+        # Find the earliest JSON start either object '{' or array '['
+        obj_start = cleaned.find('{')
+        arr_start = cleaned.find('[')
+        
+        # Determine which JSON construct appears first
+        start_idx = -1
+        mode = None  # 'object' or 'array'
+        if arr_start != -1 and (obj_start == -1 or arr_start < obj_start):
+            start_idx = arr_start
+            mode = 'array'
+        elif obj_start != -1:
+            start_idx = obj_start
+            mode = 'object'
+        else:
+            logger.warning("No JSON object or array start found in response")
             return cleaned
         
-        # Find the matching closing '}' by counting braces
-        brace_count = 0
-        json_end = -1
-        for i in range(json_start, len(cleaned)):
-            if cleaned[i] == '{':
-                brace_count += 1
-            elif cleaned[i] == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    json_end = i
-                    break
+        # Extract the balanced JSON segment
+        end_idx = -1
+        if mode == 'object':
+            brace_count = 0
+            for i in range(start_idx, len(cleaned)):
+                ch = cleaned[i]
+                if ch == '{':
+                    brace_count += 1
+                elif ch == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_idx = i
+                        break
+        else:  # array
+            bracket_count = 0
+            for i in range(start_idx, len(cleaned)):
+                ch = cleaned[i]
+                if ch == '[':
+                    bracket_count += 1
+                elif ch == ']':
+                    bracket_count -= 1
+                    if bracket_count == 0:
+                        end_idx = i
+                        break
         
-        if json_end == -1:
-            # No matching closing brace found
-            logger.warning("No matching closing brace found for JSON object")
+        if end_idx == -1:
+            logger.warning(f"No matching closing {'brace' if mode=='object' else 'bracket'} found for JSON {mode}")
             return cleaned
         
-        # Extract just the JSON portion
-        json_text = cleaned[json_start:json_end + 1]
+        json_text = cleaned[start_idx:end_idx + 1]
         
         # Log if we had to strip conversational text
-        if json_start > 0:
-            stripped_prefix = cleaned[:json_start].strip()
-            logger.info(f"Stripped conversational prefix from response: {stripped_prefix[:100]}...")
+        if start_idx > 0:
+            stripped_prefix = cleaned[:start_idx].strip()
+            if stripped_prefix:
+                logger.info(f"Stripped conversational prefix from response: {stripped_prefix[:100]}...")
         
-        if json_end < len(cleaned) - 1:
-            stripped_suffix = cleaned[json_end + 1:].strip()
+        if end_idx < len(cleaned) - 1:
+            stripped_suffix = cleaned[end_idx + 1:].strip()
             if stripped_suffix:
                 logger.info(f"Stripped conversational suffix from response: {stripped_suffix[:100]}...")
         
         return json_text.strip()
 
-    def _extract_valid_json_object(self, text: str) -> Optional[str]:
-        """Attempt to extract a valid JSON object that contains reviews from free-form text.
+    def _extract_valid_json_segment(self, text: str) -> Optional[str]:
+        """Attempt to extract a valid JSON object or array that contains reviews from free-form text.
         Strategy:
-        1) Prefer fenced ```json code blocks
-        2) Otherwise, collect all balanced brace segments and try to parse them
-           prioritizing segments that contain "\"reviews\"".
+        1) Prefer fenced ```json code blocks (object or array)
+        2) Otherwise, collect all balanced array '[' ']' and object '{' '}' segments and
+           try to parse them, prioritizing arrays and dicts that look like reviews.
         """
         if not text:
             return None
         raw = text.strip()
 
-        # 1) Look for fenced json blocks first
+        # 1) Look for fenced json blocks first (object or array)
         try:
-            code_fence_pattern = re.compile(r"```(?:json|JSON)\s*(\{[\s\S]*?\})\s*```", re.MULTILINE)
+            code_fence_pattern = re.compile(r"```(?:json|JSON)\s*([\s\S]*?)\s*```", re.MULTILINE)
             matches = list(code_fence_pattern.finditer(raw))
             for m in matches:
                 candidate = m.group(1).strip()
                 try:
                     data = json.loads(candidate)
-                    if isinstance(data, dict) and "reviews" in data:
-                        logger.info("Using JSON extracted from ```json fenced block")
+                    if isinstance(data, list) and data:
+                        if isinstance(data[0], dict):
+                            logger.info("Using JSON array extracted from ```json fenced block")
+                            return candidate
+                    if isinstance(data, dict):
+                        logger.info("Using JSON object extracted from ```json fenced block")
                         return candidate
                 except Exception:
                     continue
@@ -457,27 +553,30 @@ class GeminiClient:
             # Regex failure shouldn't break parsing
             pass
 
-        # 2) Collect balanced brace segments
-        segments = self._collect_balanced_brace_segments(raw)
-        if not segments:
+        # 2) Collect balanced segments for objects and arrays
+        obj_segments = self._collect_balanced_brace_segments(raw)
+        arr_segments = self._collect_balanced_bracket_segments(raw)
+        candidates = []
+        # Prefer arrays first, then objects
+        candidates.extend(arr_segments or [])
+        candidates.extend(obj_segments or [])
+        if not candidates:
             return None
 
-        # Prioritize segments that contain the expected top-level key
-        def sort_key(seg: str):
-            return ("\"reviews\"" not in seg, -len(seg))
-        segments.sort(key=sort_key)
+        # Sort candidates: prefer those containing 'reviews' or review-like keys, then longer
+        def looks_reviewish(seg: str) -> bool:
+            keywords = ["\"reviews\"", "\"line\"", "\"lineNumber\"", "\"comment\"", "\"message\""]
+            return any(k in seg for k in keywords)
+        candidates.sort(key=lambda s: (not looks_reviewish(s), -len(s)))
 
-        for seg in segments:
-            # Quick sanity: JSON must start with '{' and contain quotes
-            if not seg.startswith('{'):
-                continue
-            if '"' not in seg:
-                # Avoid obvious non-JSON like Go structs { Field Type }
-                continue
+        for seg in candidates:
             try:
                 data = json.loads(seg)
-                if isinstance(data, dict) and "reviews" in data:
-                    logger.info("Recovered valid JSON by scanning balanced braces in response")
+                if isinstance(data, list):
+                    if data and isinstance(data[0], dict):
+                        return seg
+                elif isinstance(data, dict):
+                    # Accept any dict; downstream will normalize single-item dicts too
                     return seg
             except Exception:
                 continue
@@ -500,7 +599,27 @@ class GeminiClient:
                 if brace_count > 0:
                     brace_count -= 1
                     if brace_count == 0 and start_idx is not None:
-                        # Extract segment
+                        segment = text[start_idx:i+1]
+                        segments.append(segment)
+                        start_idx = None
+        return segments
+
+    def _collect_balanced_bracket_segments(self, text: str) -> List[str]:
+        """Collect all top-level balanced bracket substrings from text.
+        Returns a list of substrings that start with '[' and end with the matching ']'.
+        """
+        segments: List[str] = []
+        bracket_count = 0
+        start_idx: Optional[int] = None
+        for i, ch in enumerate(text):
+            if ch == '[':
+                if bracket_count == 0:
+                    start_idx = i
+                bracket_count += 1
+            elif ch == ']':
+                if bracket_count > 0:
+                    bracket_count -= 1
+                    if bracket_count == 0 and start_idx is not None:
                         segment = text[start_idx:i+1]
                         segments.append(segment)
                         start_idx = None
