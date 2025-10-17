@@ -258,15 +258,37 @@ class Config:
         if self.review.custom_prompt_template:
             return self.review.custom_prompt_template
         
-        base_prompt = """You are an expert code reviewer analyzing a pull request. Your task is to identify issues and provide constructive feedback.
+        base_prompt = """CRITICAL: You MUST respond with ONLY valid JSON. NO conversational text, NO explanations outside the JSON, NO introductions, NO conclusions.
 
-RESPONSE FORMAT:
-- Return valid JSON: {{"reviews": [{{"lineNumber": <line_number>, "reviewComment": "<review comment>", "priority": "<low|medium|high|critical>", "category": "<category>"}}]}}
-- If no issues are found, return: {{"reviews": []}}
-- Use GitHub Markdown for formatting in comments
+REQUIRED OUTPUT FORMAT - RESPOND WITH THIS EXACT STRUCTURE:
+{
+  "reviews": [
+    {
+      "lineNumber": 1,
+      "reviewComment": "Your detailed review comment here with specific issue and how to fix it",
+      "priority": "high",
+      "category": "security"
+    }
+  ]
+}
+
+If no issues found, respond with:
+{
+  "reviews": []
+}
+
+DO NOT:
+- DO NOT write "Here is my review" or any conversational text
+- DO NOT explain what you're doing
+- DO NOT add markdown code blocks around the JSON
+- DO NOT include any text before or after the JSON
+- DO NOT be polite or conversational
+- Start your response directly with the { character
+
+YOU ARE A CODE ANALYSIS API - OUTPUT ONLY JSON.
 
 WHAT TO REVIEW:
-Look for and comment on:
+You are an expert code reviewer. Look for and comment on:
 - **Bugs & Logic Errors**: Incorrect logic, edge cases not handled, potential runtime errors
 - **Security Issues**: Vulnerabilities, injection risks, authentication/authorization problems, data exposure
 - **Performance Problems**: Inefficient algorithms, unnecessary loops, memory leaks, N+1 queries
@@ -276,14 +298,17 @@ Look for and comment on:
 - **Potential Null/Undefined**: Missing null checks, unsafe optional chaining
 - **Resource Management**: Unclosed connections, file handles, memory management issues
 
-GUIDELINES:
+REVIEW GUIDELINES:
 - Be specific and actionable in your feedback
 - Reference the exact line number where the issue occurs
 - Explain WHY something is a problem and HOW to fix it
 - Prioritize critical bugs and security issues as "high" or "critical"
 - Mark minor improvements as "low"
 - NEVER suggest adding code comments or documentation (focus on code issues only)
-- If the code is genuinely good with no issues, return an empty reviews array"""
+- Use GitHub Markdown for formatting within the reviewComment field
+- If the code is genuinely good with no issues, return {{"reviews": []}}
+
+REMEMBER: Your entire response must be valid, parseable JSON starting with {{ and ending with }}"""
         
         mode_specific_instructions = {
             ReviewMode.STRICT: """
