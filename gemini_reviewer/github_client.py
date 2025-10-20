@@ -211,6 +211,90 @@ class GitHubClient:
         except Exception as e:
             logger.error(f"Unexpected error while fetching diff: {str(e)}")
             raise GitHubClientError(f"Failed to fetch diff: {str(e)}")
+        
+    def get_last_reviewed_commit_sha(self, pr_details: PRDetails) -> Optional[str]:
+        """Best-effort detection of the last commit SHA this bot/user has reviewed on the PR.
+        Strategy:
+        - Look for the latest PR review created by the authenticated user; use its commit_id.
+        - If none, scan review comments by this user and use the most recent comment's commit_id.
+        Returns SHA or None if not found.
+        """
+        try:
+            repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
+            pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
+            # Determine current authenticated user login
+            try:
+                me = self._client.get_user()
+                my_login = getattr(me, 'login', None)
+            except Exception:
+                my_login = None
+            latest_sha: Optional[str] = None
+            latest_time = None
+            # Check PR reviews (these include summary reviews created via create_review)
+            try:
+                for rv in pr.get_reviews():
+                    try:
+                        if my_login and getattr(rv.user, 'login', None) != my_login:
+                            continue
+                        commit_id = getattr(rv, 'commit_id', None)
+                        submitted_at = getattr(rv, 'submitted_at', None)
+                        if commit_id:
+                            if latest_time is None or (submitted_at and submitted_at > latest_time):
+                                latest_time = submitted_at
+                                latest_sha = commit_id
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            # Fallback: scan review comments
+            try:
+                for c in pr.get_review_comments():
+                    try:
+                        if my_login and getattr(c.user, 'login', None) != my_login:
+                            continue
+                        commit_id = getattr(c, 'commit_id', None)
+                        created_at = getattr(c, 'created_at', None)
+                        if commit_id:
+                            if latest_time is None or (created_at and created_at > latest_time):
+                                latest_time = created_at
+                                latest_sha = commit_id
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+            if latest_sha:
+                logger.info(f"Detected last reviewed commit by this bot: {latest_sha}")
+            else:
+                logger.info("No prior bot reviews detected on this PR.")
+            return latest_sha
+        except Exception as e:
+            logger.debug(f"Could not determine last reviewed commit: {e}")
+            return None
+        
+    def get_pr_diff_since(self, pr_details: PRDetails, base_sha: str) -> Optional[str]:
+        """Fetch a diff of changes since a given base SHA up to the PR head.
+        Uses GitHub compare API. Returns diff text or None on failure.
+        """
+        try:
+            if not base_sha or not pr_details.head_sha:
+                return None
+            repo_name = pr_details.repo_full_name
+            # If base equals head, nothing to review
+            if base_sha == pr_details.head_sha:
+                logger.info("Base SHA equals head; no new changes to review.")
+                return ""
+            api_url = f"{self.config.api_base_url}/repos/{repo_name}/compare/{base_sha}...{pr_details.head_sha}.diff"
+            diff_headers = {'Accept': 'application/vnd.github.v3.diff'}
+            logger.info(f"Fetching incremental diff: {base_sha[:7]}... to {pr_details.head_sha[:7]}...")
+            resp = self._session.get(api_url, headers=diff_headers, timeout=self.config.timeout)
+            if resp.status_code == 200:
+                return resp.text
+            else:
+                logger.warning(f"Compare API failed with {resp.status_code}; falling back to full PR diff.")
+                return None
+        except Exception as e:
+            logger.debug(f"Failed to get incremental diff: {e}")
+            return None
     
     @retry(
         stop=stop_after_attempt(2),

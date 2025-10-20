@@ -60,6 +60,11 @@ class CodeReviewer:
             
             # Get and parse diff
             diff_content = await self._get_pr_diff(pr_details)
+            if diff_content == "":
+                logger.info("No new changes to review; exiting without posting a review.")
+                self.stats.end_time = time.time()
+                result.processing_time = self.stats.duration
+                return result
             if not diff_content:
                 result.errors.append("Failed to retrieve PR diff")
                 return result
@@ -67,7 +72,9 @@ class CodeReviewer:
             # Parse diff into structured format
             diff_files = await self._parse_diff(diff_content)
             if not diff_files:
-                result.errors.append("No files found in PR diff")
+                logger.info("No files found in diff; nothing to review.")
+                self.stats.end_time = time.time()
+                result.processing_time = self.stats.duration
                 return result
             
             # Filter files based on configuration
@@ -108,9 +115,24 @@ class CodeReviewer:
             return result
     
     async def _get_pr_diff(self, pr_details: PRDetails) -> str:
-        """Get PR diff with error handling."""
+        """Get PR diff with error handling. If the PR has previous AI review activity by this bot,
+        only fetch and review changes introduced since the last reviewed commit to avoid duplicate or stale comments.
+        """
         try:
             logger.info("Fetching PR diff...")
+            # Try to limit scope to new commits since last AI review
+            since_sha = self.github_client.get_last_reviewed_commit_sha(pr_details)
+            incremental_diff = None
+            if since_sha:
+                incremental_diff = self.github_client.get_pr_diff_since(pr_details, since_sha)
+                if incremental_diff is not None:
+                    if incremental_diff == "":
+                        logger.info("No new changes since last AI review; skipping diff analysis.")
+                        return ""
+                    logger.info("Using incremental diff since last AI-reviewed commit.")
+                    logger.debug(f"Retrieved incremental diff with {len(incremental_diff)} characters")
+                    return incremental_diff
+            # Fallback to full PR diff
             diff_content = self.github_client.get_pr_diff(
                 pr_details.owner, pr_details.repo, pr_details.pull_number
             )
