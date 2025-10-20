@@ -216,8 +216,9 @@ class GitHubClient:
     def get_last_reviewed_commit_sha(self, pr_details: PRDetails) -> Optional[str]:
         """Best-effort detection of the last commit SHA this bot/user has reviewed on the PR.
         Strategy:
-        - Look for the latest PR review created by the authenticated user; use its commit_id.
-        - If none, scan review comments by this user and use the most recent comment's commit_id.
+        - Prefer PR reviews and comments authored by the authenticated bot user.
+        - If the authenticated user cannot be determined, only trust inline review comments
+          that contain this bot's hidden AI signature marker.
         Returns SHA or None if not found.
         """
         try:
@@ -231,38 +232,48 @@ class GitHubClient:
                 my_login = None
             latest_sha: Optional[str] = None
             latest_time = None
-            # Check PR reviews (these include summary reviews created via create_review)
-            try:
-                for rv in pr.get_reviews():
-                    try:
-                        if my_login and getattr(rv.user, 'login', None) != my_login:
-                            continue
-                        commit_id = getattr(rv, 'commit_id', None)
-                        submitted_at = getattr(rv, 'submitted_at', None)
-                        if commit_id:
-                            if latest_time is None or (submitted_at and submitted_at > latest_time):
+
+            # If we know our login, consider PR reviews authored by us (summary reviews)
+            if my_login:
+                try:
+                    for rv in pr.get_reviews():
+                        try:
+                            if getattr(rv.user, 'login', None) != my_login:
+                                continue
+                            commit_id = getattr(rv, 'commit_id', None)
+                            submitted_at = getattr(rv, 'submitted_at', None)
+                            if commit_id and (latest_time is None or (submitted_at and submitted_at > latest_time)):
                                 latest_time = submitted_at
                                 latest_sha = commit_id
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-            # Fallback: scan review comments
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+
+            # Scan inline review comments
             try:
                 for c in pr.get_review_comments():
                     try:
-                        if my_login and getattr(c.user, 'login', None) != my_login:
-                            continue
+                        body = getattr(c, 'body', '') or ''
+                        has_sig = re.search(r'<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->', body, flags=re.IGNORECASE) is not None
+                        if my_login:
+                            # If authored by someone else and missing our signature, skip
+                            if getattr(c.user, 'login', None) != my_login and not has_sig:
+                                continue
+                        else:
+                            # Unknown login: only trust comments containing our signature marker
+                            if not has_sig:
+                                continue
                         commit_id = getattr(c, 'commit_id', None)
                         created_at = getattr(c, 'created_at', None)
-                        if commit_id:
-                            if latest_time is None or (created_at and created_at > latest_time):
-                                latest_time = created_at
-                                latest_sha = commit_id
+                        if commit_id and (latest_time is None or (created_at and created_at > latest_time)):
+                            latest_time = created_at
+                            latest_sha = commit_id
                     except Exception:
                         continue
             except Exception:
                 pass
+
             if latest_sha:
                 logger.info(f"Detected last reviewed commit by this bot: {latest_sha}")
             else:
@@ -289,7 +300,12 @@ class GitHubClient:
             logger.info(f"Fetching incremental diff: {base_sha[:7]}... to {pr_details.head_sha[:7]}...")
             resp = self._session.get(api_url, headers=diff_headers, timeout=self.config.timeout)
             if resp.status_code == 200:
-                return resp.text
+                text = resp.text or ""
+                if text.strip() == "":
+                    # Empty diff from compare API; fall back to full PR diff to avoid false "no changes"
+                    logger.info("Incremental compare returned empty diff; falling back to full PR diff.")
+                    return None
+                return text
             else:
                 logger.warning(f"Compare API failed with {resp.status_code}; falling back to full PR diff.")
                 return None
