@@ -199,9 +199,9 @@ class Config:
         
         # Review configuration
         exclude_patterns_raw = os.environ.get("EXCLUDE", "") or os.environ.get("INPUT_EXCLUDE", "")
-        exclude_patterns = []
-        if exclude_patterns_raw:
-            exclude_patterns = [p.strip() for p in exclude_patterns_raw.split(",") if p.strip()]
+        include_patterns_raw = os.environ.get("INCLUDE", "") or os.environ.get("INPUT_INCLUDE", "")
+        exclude_patterns = [p.strip() for p in exclude_patterns_raw.split(",") if p.strip()] if exclude_patterns_raw else []
+        include_patterns = [p.strip() for p in include_patterns_raw.split(",") if p.strip()] if include_patterns_raw else []
         
         review_mode_str = os.environ.get("REVIEW_MODE", "standard").lower()
         review_mode = ReviewMode.STANDARD
@@ -210,6 +210,19 @@ class Config:
         except ValueError:
             logging.warning(f"Invalid review mode '{review_mode_str}', using 'standard'")
         
+        # Priority threshold
+        priority_str = (
+            os.environ.get("REVIEW_PRIORITY_THRESHOLD")
+            or os.environ.get("INPUT_REVIEW_PRIORITY_THRESHOLD")
+            or os.environ.get("PRIORITY_THRESHOLD")
+        )
+        priority_threshold = ReviewPriority.LOW
+        if priority_str:
+            try:
+                priority_threshold = ReviewPriority(priority_str.strip().lower())
+            except ValueError:
+                logging.warning(f"Invalid priority threshold '{priority_str}', using 'low'")
+        
         # Get custom system prompt if provided
         system_prompt = os.environ.get("SYSTEM_PROMPT", "") or os.environ.get("INPUT_SYSTEM_PROMPT", "")
         custom_prompt_template = system_prompt.strip() if system_prompt else None
@@ -217,11 +230,13 @@ class Config:
         review_config = ReviewConfig(
             review_mode=review_mode,
             exclude_patterns=exclude_patterns,
+            include_patterns=include_patterns,
             max_files_per_review=int(os.environ.get("MAX_FILES_PER_REVIEW", "50")),
             max_lines_per_hunk=int(os.environ.get("MAX_LINES_PER_HUNK", "500")),
             review_test_files=os.environ.get("REVIEW_TEST_FILES", "false").lower() == "true",
             review_docs=os.environ.get("REVIEW_DOCS", "false").lower() == "true",
-            custom_prompt_template=custom_prompt_template
+            custom_prompt_template=custom_prompt_template,
+            priority_threshold=priority_threshold
         )
         
         # Performance configuration
@@ -284,7 +299,7 @@ DO NOT:
 - DO NOT add markdown code blocks around the JSON
 - DO NOT include any text before or after the JSON
 - DO NOT be polite or conversational
-- Start your response directly with the { character
+- DO start your response directly with the { character
 
 YOU ARE A CODE ANALYSIS API - OUTPUT ONLY JSON.
 
@@ -318,12 +333,12 @@ REVIEW GUIDELINES:
 - Mark minor improvements as "low"
 - NEVER suggest adding code comments or documentation (focus on code issues only)
 - Use GitHub Markdown for formatting within the reviewComment field
-- If the code is genuinely good with no issues, return {{"reviews": []}}
+- If the code is genuinely good with no issues, return {"reviews": []}
 
 VALIDATION:
 - If you cannot include an accurate anchorSnippet from the targeted line, return {"reviews": []} instead of guessing.
 
-REMEMBER: Your entire response must be valid, parseable JSON starting with {{ and ending with }}"""
+REMEMBER: Your entire response must be valid, parseable JSON starting with { and ending with }"""
         
         mode_specific_instructions = {
             ReviewMode.STRICT: """
@@ -386,9 +401,10 @@ REMEMBER: Your entire response must be valid, parseable JSON starting with {{ an
     
     @staticmethod
     def _is_test_file(file_path: str) -> bool:
-        """Check if file is a test file."""
-        test_patterns = ['test_', '_test.', 'spec_', '_spec.', '/test/', '/tests/']
-        return any(pattern in file_path.lower() for pattern in test_patterns)
+        """Check if file is a test file (cross-platform)."""
+        lowered = file_path.lower()
+        test_patterns = ['test_', '_test.', 'spec_', '_spec.', '/test/', '/tests/', '\\test\\', '\\tests\\']
+        return any(pattern in lowered for pattern in test_patterns)
     
     @staticmethod
     def _is_doc_file(file_path: str) -> bool:
@@ -413,6 +429,8 @@ REMEMBER: Your entire response must be valid, parseable JSON starting with {{ an
                 "review_mode": self.review.review_mode.value,
                 "focus_areas": [area.value for area in self.review.focus_areas],
                 "exclude_patterns": self.review.exclude_patterns,
+                "include_patterns": self.review.include_patterns,
+                "priority_threshold": self.review.priority_threshold.value,
                 "max_files_per_review": self.review.max_files_per_review,
                 "max_lines_per_hunk": self.review.max_lines_per_hunk,
             },
