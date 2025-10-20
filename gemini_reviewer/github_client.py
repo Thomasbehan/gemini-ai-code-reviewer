@@ -8,7 +8,9 @@ diffs, and creating review comments with proper retry logic and error handling.
 import json
 import logging
 import requests
-from typing import List, Dict, Any, Optional
+import hashlib
+import re
+from typing import List, Dict, Any, Optional, Set
 from github import Github
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -282,7 +284,9 @@ class GitHubClient:
             raise GitHubClientError(f"Failed to create review: {str(e)}")
     
     def _validate_and_sanitize_comment(self, comment: ReviewComment) -> Optional[Dict[str, Any]]:
-        """Validate and sanitize a review comment."""
+        """Validate and sanitize a review comment.
+        Appends a hidden signature marker to the body for future deduplication.
+        """
         try:
             # Check required fields
             if not all([comment.body, comment.path]):
@@ -300,6 +304,13 @@ class GitHubClient:
                 'path': self._sanitize_input(str(comment.path)),
                 'position': comment.position
             }
+
+            # Append hidden signature marker for deduplication on future runs
+            try:
+                body_with_marker = self._append_signature_marker(sanitized_comment['body'], sanitized_comment['path'])
+                sanitized_comment['body'] = body_with_marker
+            except Exception as marker_err:
+                logger.debug(f"Could not append signature marker: {marker_err}")
             
             return sanitized_comment
             
@@ -355,6 +366,95 @@ class GitHubClient:
         cleaned = ''.join(ch for ch in text if (ord(ch) >= 32) or ch in '\t\n\r')
         return cleaned.strip()
     
+    def _strip_signature_marker(self, body: str) -> str:
+        """Remove hidden AI signature marker from a comment body, if present."""
+        try:
+            return re.sub(r'<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->\s*$', '', body or '', flags=re.IGNORECASE).strip()
+        except Exception:
+            return body
+
+    def _normalize_for_signature(self, text: str) -> str:
+        """Normalize text to compute a stable signature: lowercase, collapse whitespace, strip marker."""
+        base = self._sanitize_input(text or "")
+        base = self._strip_signature_marker(base)
+        base = re.sub(r'\s+', ' ', base).strip().lower()
+        return base
+
+    def _compute_signature(self, path: str, body: str) -> str:
+        """Compute a stable signature for a comment using path + normalized body."""
+        norm = self._normalize_for_signature(body)
+        h = hashlib.sha1(f"{path}|{norm}".encode('utf-8')).hexdigest()[:12]
+        return f"{path}:{h}"
+
+    def _append_signature_marker(self, body: str, path: str) -> str:
+        """Append a hidden HTML comment with the signature so future runs can dedupe reliably."""
+        try:
+            if not body:
+                body = ""
+            # If already has a marker, don't add another
+            if re.search(r'<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->', body or '', flags=re.IGNORECASE):
+                return body
+            sig = self._compute_signature(path, body).split(":")[-1]
+            return f"{body}\n<!-- AI-SIG:{sig} -->"
+        except Exception:
+            return body
+
+    def get_existing_comment_signatures(self, pr_details: PRDetails) -> Set[str]:
+        """Fetch existing PR review comments and build a set of signatures to avoid duplicates."""
+        try:
+            repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
+            pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
+            sigs: Set[str] = set()
+            try:
+                existing_comments = pr.get_review_comments()
+            except Exception:
+                existing_comments = []
+            for c in existing_comments:
+                try:
+                    path = getattr(c, 'path', None)
+                    if not path:
+                        continue
+                    body = getattr(c, 'body', '') or ''
+                    # Prefer embedded signature if present
+                    m = re.search(r'<!--\s*AI-SIG:([a-f0-9]{6,})\s*-->', body, flags=re.IGNORECASE)
+                    if m:
+                        sigs.add(f"{path}:{m.group(1)[:12]}")
+                    # Also add computed signature from normalized body
+                    cleaned_body = self._strip_signature_marker(body)
+                    sigs.add(self._compute_signature(path, cleaned_body))
+                except Exception:
+                    continue
+            logger.info(f"Loaded {len(sigs)} existing review comment signatures for PR #{pr_details.pull_number}")
+            return sigs
+        except Exception as e:
+            logger.debug(f"Could not fetch existing review comments: {e}")
+            return set()
+
+    def filter_out_existing_comments(self, pr_details: PRDetails, comments: List[ReviewComment]) -> List[ReviewComment]:
+        """Filter out comments that match signatures of existing PR comments; also dedupe within batch."""
+        try:
+            existing = self.get_existing_comment_signatures(pr_details)
+            filtered: List[ReviewComment] = []
+            seen: Set[str] = set()
+            skipped = 0
+            for cm in comments:
+                try:
+                    sig = self._compute_signature(cm.path, cm.body)
+                    if sig in existing or sig in seen:
+                        skipped += 1
+                        continue
+                    seen.add(sig)
+                    filtered.append(cm)
+                except Exception:
+                    # On any error, keep the comment rather than dropping it
+                    filtered.append(cm)
+            if skipped > 0:
+                logger.info(f"Deduped comments: skipped {skipped} already-posted or duplicate comments; {len(filtered)} remain")
+            return filtered
+        except Exception as e:
+            logger.debug(f"Deduplication failed (continuing without dedupe): {e}")
+            return comments
+
     def get_repository_info(self, owner: str, repo: str) -> Dict[str, Any]:
         """Get repository information."""
         try:

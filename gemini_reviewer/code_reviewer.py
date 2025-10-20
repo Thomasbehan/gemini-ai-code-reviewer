@@ -473,6 +473,11 @@ class CodeReviewer:
         try:
             total_comments = len(comments)
             logger.info(f"Creating GitHub review with {total_comments} total comments...")
+
+            # First, deduplicate against existing PR comments and within this batch
+            comments = self.github_client.filter_out_existing_comments(pr_details, comments)
+            total_comments = len(comments)
+            logger.info(f"After deduplication, {total_comments} comments remain to consider.")
             
             # Filter comments by priority if configured
             filtered_comments = self._filter_comments_by_priority(comments)
