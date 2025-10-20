@@ -10,6 +10,7 @@ import logging
 import requests
 import hashlib
 import re
+import os
 from typing import List, Dict, Any, Optional, Set
 import difflib
 from github import Github
@@ -215,26 +216,63 @@ class GitHubClient:
         
     def get_last_reviewed_commit_sha(self, pr_details: PRDetails) -> Optional[str]:
         """Best-effort detection of the last commit SHA this bot/user has reviewed on the PR.
-        Strategy:
-        - Prefer PR reviews and comments authored by the authenticated bot user.
-        - If the authenticated user cannot be determined, only trust inline review comments
-          that contain this bot's hidden AI signature marker.
+        Strategy (more reliable):
+        - Prefer the most recent inline review comment authored by this bot (or containing our hidden AI signature).
+        - Fall back to PR reviews authored by this bot (summary reviews) if no suitable inline comment is found.
+        - If the authenticated user cannot be determined, also consider comments authored by candidate bot logins
+          (GITHUB_ACTOR and github-actions[bot]) in addition to signed comments.
         Returns SHA or None if not found.
         """
         try:
             repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
             pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
-            # Determine current authenticated user login
+
+            # Determine current authenticated user login and candidate bot logins
             try:
                 me = self._client.get_user()
                 my_login = getattr(me, 'login', None)
             except Exception:
                 my_login = None
+            actor = os.getenv('GITHUB_ACTOR') or None
+            candidate_logins: Set[str] = set(filter(None, [my_login, actor, 'github-actions[bot]', 'github-actions']))
+
             latest_sha: Optional[str] = None
             latest_time = None
+            source = None  # 'comment' or 'review'
 
-            # If we know our login, consider PR reviews authored by us (summary reviews)
-            if my_login:
+            # 1) Prefer inline review comments (most accurate signal)
+            try:
+                for c in pr.get_review_comments():
+                    try:
+                        body = getattr(c, 'body', '') or ''
+                        author = getattr(getattr(c, 'user', None), 'login', None)
+                        has_sig = re.search(r'<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->', body, flags=re.IGNORECASE) is not None
+
+                        # Decide if we should trust this comment as authored by us
+                        trust = False
+                        if my_login and author == my_login:
+                            trust = True
+                        elif has_sig:
+                            trust = True
+                        elif author and author in candidate_logins:
+                            trust = True
+
+                        if not trust:
+                            continue
+
+                        commit_id = getattr(c, 'commit_id', None)
+                        created_at = getattr(c, 'created_at', None)
+                        if commit_id and (latest_time is None or (created_at and created_at > latest_time)):
+                            latest_time = created_at
+                            latest_sha = commit_id
+                            source = 'comment'
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            # 2) Fallback: PR reviews authored by us
+            if latest_sha is None and my_login:
                 try:
                     for rv in pr.get_reviews():
                         try:
@@ -245,39 +283,16 @@ class GitHubClient:
                             if commit_id and (latest_time is None or (submitted_at and submitted_at > latest_time)):
                                 latest_time = submitted_at
                                 latest_sha = commit_id
+                                source = 'review'
                         except Exception:
                             continue
                 except Exception:
                     pass
 
-            # Scan inline review comments
-            try:
-                for c in pr.get_review_comments():
-                    try:
-                        body = getattr(c, 'body', '') or ''
-                        has_sig = re.search(r'<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->', body, flags=re.IGNORECASE) is not None
-                        if my_login:
-                            # If authored by someone else and missing our signature, skip
-                            if getattr(c.user, 'login', None) != my_login and not has_sig:
-                                continue
-                        else:
-                            # Unknown login: only trust comments containing our signature marker
-                            if not has_sig:
-                                continue
-                        commit_id = getattr(c, 'commit_id', None)
-                        created_at = getattr(c, 'created_at', None)
-                        if commit_id and (latest_time is None or (created_at and created_at > latest_time)):
-                            latest_time = created_at
-                            latest_sha = commit_id
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
             if latest_sha:
-                logger.info(f"Detected last reviewed commit by this bot: {latest_sha}")
+                logger.info(f"Detected last reviewed commit by this bot from {source}: {latest_sha}")
             else:
-                logger.info("No prior bot reviews detected on this PR.")
+                logger.info("No prior bot review activity detected on this PR.")
             return latest_sha
         except Exception as e:
             logger.debug(f"Could not determine last reviewed commit: {e}")
