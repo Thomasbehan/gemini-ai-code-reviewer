@@ -668,20 +668,19 @@ class GeminiClient:
     
     @staticmethod
     def _sanitize_text(text: str) -> str:
-        """Sanitize text input to prevent injection attacks."""
+        """Lightly sanitize text while preserving Markdown/code formatting.
+        - Keeps backticks and symbols so code fences and inline code render correctly.
+        - Removes null bytes and non-printable control characters.
+        - Trims surrounding whitespace.
+        GitHub renders Markdown safely, so additional HTML escaping is unnecessary here.
+        """
         if not isinstance(text, str):
             return str(text) if text is not None else ""
         
-        import html
-        # HTML escape to prevent XSS
-        sanitized = html.escape(text)
+        # Remove null bytes and control characters except common whitespace (tab/newline/carriage return)
+        cleaned = ''.join(ch for ch in text if (ord(ch) >= 32) or ch in '\t\n\r')
         
-        # Remove potential command injection characters
-        dangerous_chars = ['`', '$', '$(', '${', '|', '&&', '||', ';', '&']
-        for char in dangerous_chars:
-            sanitized = sanitized.replace(char, '')
-        
-        return sanitized.strip()
+        return cleaned.strip()
     
     @staticmethod
     def _sanitize_code_content(content: str) -> str:

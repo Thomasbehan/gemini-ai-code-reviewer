@@ -340,20 +340,16 @@ class GitHubClient:
     
     @staticmethod
     def _sanitize_input(text: str) -> str:
-        """Sanitize user input to prevent injection attacks."""
+        """Lightly sanitize text while preserving Markdown and code formatting.
+        - Do not HTML-escape; GitHub safely renders Markdown and escapes HTML.
+        - Remove null bytes and non-printable control characters only.
+        - Trim whitespace.
+        """
         if not isinstance(text, str):
             return str(text) if text is not None else ""
         
-        import html
-        # HTML escape to prevent XSS
-        sanitized = html.escape(text)
-        
-        # Remove potential command injection characters
-        dangerous_chars = ['`', '$', '$(', '${', '|', '&&', '||', ';', '&']
-        for char in dangerous_chars:
-            sanitized = sanitized.replace(char, '')
-        
-        return sanitized.strip()
+        cleaned = ''.join(ch for ch in text if (ord(ch) >= 32) or ch in '\t\n\r')
+        return cleaned.strip()
     
     def get_repository_info(self, owner: str, repo: str) -> Dict[str, Any]:
         """Get repository information."""

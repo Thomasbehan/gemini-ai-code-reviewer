@@ -87,10 +87,13 @@ class CodeReviewer:
             
             result.comments = comments
             
-            # Always create a review on GitHub (approve if no comments, request changes if comments exist)
-            success = await self._create_github_review(pr_details, comments)
-            if not success:
-                result.errors.append("Failed to create GitHub review")
+            # Post a final positive review only if there are no comments at all
+            if len(comments) == 0:
+                logger.info("No comments generated across all files - posting a final positive review.")
+                await self._create_github_review(pr_details, comments, preferred_event="COMMENT")
+            else:
+                # Per-file reviews have already been posted; skip aggregated final review to avoid large payloads.
+                logger.info("Per-file reviews posted; skipping aggregated final review to avoid large payloads.")
             
             # Finalize statistics
             self.stats.end_time = time.time()
@@ -181,6 +184,13 @@ class CodeReviewer:
                 file_comments = await self._analyze_single_file(diff_file, pr_details)
                 all_comments.extend(file_comments)
                 self.stats.files_processed += 1
+
+                # Post comments for this file immediately to avoid large aggregated reviews
+                if file_comments:
+                    logger.info(f"Posting review for file: {diff_file.file_info.path} with {len(file_comments)} comments")
+                    await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
+                else:
+                    logger.debug(f"No comments for file: {diff_file.file_info.path}")
                 
             except Exception as e:
                 logger.error(f"Error analyzing file {diff_file.file_info.path}: {str(e)}")
@@ -222,6 +232,13 @@ class CodeReviewer:
                     
                     logger.debug(f"Completed analysis of {diff_file.file_info.path} "
                                f"({len(file_comments)} comments)")
+
+                    # Post comments for this file immediately
+                    if file_comments:
+                        logger.info(f"Posting review for file: {diff_file.file_info.path} with {len(file_comments)} comments")
+                        await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
+                    else:
+                        logger.debug(f"No comments for file: {diff_file.file_info.path}")
                     
                 except Exception as e:
                     logger.error(f"Error analyzing file {diff_file.file_info.path}: {str(e)}")
@@ -450,8 +467,10 @@ class CodeReviewer:
             logger.warning(f"Error converting AI response to comment: {str(e)}")
             return None
     
-    async def _create_github_review(self, pr_details: PRDetails, comments: List[ReviewComment]) -> bool:
-        """Create GitHub review with comments."""
+    async def _create_github_review(self, pr_details: PRDetails, comments: List[ReviewComment], preferred_event: Optional[str] = None) -> bool:
+        """Create GitHub review with comments.
+        If preferred_event is provided, it will be used instead of auto-deciding.
+        """
         try:
             total_comments = len(comments)
             logger.info(f"Creating GitHub review with {total_comments} total comments...")
@@ -459,19 +478,26 @@ class CodeReviewer:
             # Filter comments by priority if configured
             filtered_comments = self._filter_comments_by_priority(comments)
             
-            # Determine review event based on whether there are comments
+            # Determine review event
             # Note: Using COMMENT instead of APPROVE because GitHub Actions tokens
             # are not permitted to approve pull requests (GitHub API restriction)
-            if not filtered_comments:
-                if total_comments > 0:
-                    logger.info(f"All {total_comments} comments were filtered by priority threshold - posting comment about this")
-                    event = "COMMENT"
+            if preferred_event:
+                event = preferred_event
+                if filtered_comments:
+                    logger.info(f"Using preferred event '{event}' for {len(filtered_comments)} comments")
                 else:
-                    logger.info("No comments generated - posting positive review")
-                    event = "COMMENT"
+                    logger.info(f"Using preferred event '{event}' with no comments")
             else:
-                logger.info(f"Found {len(filtered_comments)} comments (out of {total_comments} total) - requesting changes")
-                event = "REQUEST_CHANGES"
+                if not filtered_comments:
+                    if total_comments > 0:
+                        logger.info(f"All {total_comments} comments were filtered by priority threshold - posting comment about this")
+                        event = "COMMENT"
+                    else:
+                        logger.info("No comments generated - posting positive review")
+                        event = "COMMENT"
+                else:
+                    logger.info(f"Found {len(filtered_comments)} comments (out of {total_comments} total) - requesting changes")
+                    event = "REQUEST_CHANGES"
             
             # Pass both total and filtered comments so summary can be accurate
             success = self.github_client.create_review(
@@ -482,7 +508,7 @@ class CodeReviewer:
             )
             if success:
                 if filtered_comments:
-                    logger.info("✅ Successfully created GitHub review with change requests")
+                    logger.info("✅ Successfully created GitHub review")
                 else:
                     logger.info("✅ Successfully posted review")
             
