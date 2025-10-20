@@ -9,7 +9,7 @@ import asyncio
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 
 from .config import Config
 from .models import (
@@ -41,6 +41,9 @@ class CodeReviewer:
         self.gemini_client = GeminiClient(config.gemini)
         self.diff_parser = DiffParser()
         
+        # Cache of existing AI comment signatures for this PR/session to avoid re-generating the same comments
+        self._existing_comment_signatures: Set[str] = set()
+        
         # Statistics tracking
         self.stats = ProcessingStats(start_time=time.time())
         
@@ -54,6 +57,14 @@ class CodeReviewer:
             # Extract PR details from GitHub event
             pr_details = self.github_client.get_pr_details_from_event(event_path)
             logger.info(f"Reviewing PR #{pr_details.pull_number}: {pr_details.title}")
+            
+            # Load existing AI comment signatures so we can avoid re-generating the same comments
+            try:
+                self._existing_comment_signatures = self.github_client.get_existing_comment_signatures(pr_details)
+                logger.info(f"Loaded {len(self._existing_comment_signatures)} existing AI comment signatures for duplicate avoidance during analysis")
+            except Exception as _e:
+                logger.debug(f"Could not load existing comment signatures prior to analysis: {_e}")
+                self._existing_comment_signatures = set()
             
             # Create initial result object
             result = ReviewResult(pr_details=pr_details)
@@ -278,6 +289,7 @@ class CodeReviewer:
         logger.debug(f"Starting analysis of {file_path}")
         
         file_comments = []
+        skipped_pre_existing = 0
         
         # Detect related files and gather project context
         related_files = await self._detect_related_files(diff_file, pr_details)
@@ -313,7 +325,22 @@ class CodeReviewer:
                         ai_response, diff_file, hunk, hunk_index
                     )
                     if comment:
-                        file_comments.append(comment)
+                        # Preemptive duplicate avoidance: skip if this comment (path+body) matches an existing signature
+                        try:
+                            sig = self.github_client._compute_signature(comment.path, comment.body)
+                        except Exception:
+                            sig = None
+                        if sig and sig in getattr(self, '_existing_comment_signatures', set()):
+                            skipped_pre_existing += 1
+                            logger.debug(f"Skipping generated duplicate comment on {comment.path} at pos {comment.position}")
+                        else:
+                            file_comments.append(comment)
+                            # Update the session cache so we avoid emitting the same suggestion again later in this run
+                            try:
+                                if sig:
+                                    self._existing_comment_signatures.add(sig)
+                            except Exception:
+                                pass
                 
             except GeminiClientError as e:
                 logger.warning(f"AI analysis failed for hunk {hunk_index+1} in {file_path}: {str(e)}")
@@ -461,29 +488,108 @@ class CodeReviewer:
         hunk: HunkInfo,
         hunk_index: int
     ) -> Optional[ReviewComment]:
-        """Convert AI response to GitHub review comment."""
+        """Convert AI response to GitHub review comment with basic anchoring validation.
+        Tries to ensure the comment targets the correct line by matching an anchor snippet
+        to the diff lines. If mismatch, attempts to realign; otherwise discards to avoid noise.
+        """
         try:
-            # Calculate the position in the diff for GitHub API
-            # This is a simplified calculation - in a real implementation,
-            # you'd need to properly map line numbers to diff positions
-            position = ai_response.line_number
-            
-            # Ensure position is within hunk bounds
+            # Start with the provided position as 1-based index within this hunk
+            position = int(ai_response.line_number)
+
+            # Helper to strip diff prefix and get comparable content
+            def _line_payload(s: str) -> str:
+                if not s:
+                    return ""
+                # Remove leading diff marker and one space if present
+                if s[0] in ['+', '-', ' ']:
+                    s = s[1:]
+                return s.lstrip('\t ')
+
+            # Guard: position within bounds
             if position < 1 or position > len(hunk.lines):
-                logger.warning(f"Line number {position} is outside hunk range")
+                logger.warning(f"Line number {position} is outside hunk range (1..{len(hunk.lines)})")
                 return None
-            
+
+            anchor = getattr(ai_response, 'anchor_snippet', None)
+            anchor = anchor.strip() if isinstance(anchor, str) else None
+
+            # If we have an anchor, validate alignment; else try to infer from comment
+            if not anchor:
+                # Try to infer from inline code span in the comment
+                body = ai_response.review_comment or ""
+                if '`' in body:
+                    try:
+                        import re as _re
+                        m = _re.search(r"`([^`\n]+)`", body)
+                        if m:
+                            candidate = m.group(1).strip()
+                            if len(candidate) >= 2:
+                                anchor = candidate
+                    except Exception:
+                        pass
+
+            # If we have an anchor snippet, attempt validation and possible realignment
+            if anchor:
+                target_line = _line_payload(hunk.lines[position - 1])
+                if anchor not in target_line:
+                    # Search for best match within the hunk
+                    matches = []
+                    for idx, raw in enumerate(hunk.lines, start=1):
+                        payload = _line_payload(raw)
+                        if anchor in payload:
+                            matches.append(idx)
+                    if len(matches) == 1:
+                        # Realign to the unique matching line
+                        logger.info(f"Realigning comment from line {position} to {matches[0]} based on anchor match")
+                        position = matches[0]
+                    elif len(matches) > 1:
+                        # Prefer lines with additions ('+')
+                        add_matches = [i for i in matches if hunk.lines[i - 1].startswith('+')]
+                        if len(add_matches) == 1:
+                            position = add_matches[0]
+                            logger.info(f"Realigning to added line {position} among multiple matches")
+                        else:
+                            # Fall back to nearest match to original
+                            nearest = min(matches, key=lambda i: abs(i - position))
+                            logger.info(f"Multiple matches; choosing nearest line {nearest} to original {position}")
+                            position = nearest
+                    else:
+                        # No match: discard to avoid unrelated comment
+                        logger.warning("Anchor snippet not found in hunk; discarding comment to avoid misalignment")
+                        return None
+
+            # Prefer commenting on added lines; if current is deletion-only, try to nudge to nearby added/context
+            if hunk.lines[position - 1].startswith('-'):
+                # Look within a small window for a '+' or ' ' line
+                window = range(max(1, position - 2), min(len(hunk.lines), position + 2) + 1)
+                preferred = None
+                for i in window:
+                    if hunk.lines[i - 1].startswith('+'):
+                        preferred = i
+                        break
+                if not preferred:
+                    for i in window:
+                        if hunk.lines[i - 1].startswith(' '):
+                            preferred = i
+                            break
+                if preferred:
+                    logger.info(f"Adjusting position from deletion line {position} to nearby line {preferred}")
+                    position = preferred
+
+            # Final bounds check
+            if position < 1 or position > len(hunk.lines):
+                return None
+
             comment = ReviewComment(
                 body=ai_response.review_comment,
                 path=diff_file.file_info.path,
                 position=position,
-                line_number=ai_response.line_number,
+                line_number=position,
                 priority=ai_response.priority,
                 category=ai_response.category
             )
-            
             return comment
-            
+
         except Exception as e:
             logger.warning(f"Error converting AI response to comment: {str(e)}")
             return None

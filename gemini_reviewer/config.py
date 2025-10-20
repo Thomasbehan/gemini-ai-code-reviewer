@@ -267,7 +267,8 @@ REQUIRED OUTPUT FORMAT - RESPOND WITH THIS EXACT STRUCTURE:
       "lineNumber": 1,
       "reviewComment": "Your detailed review comment here with specific issue and how to fix it",
       "priority": "high",
-      "category": "security"
+      "category": "security",
+      "anchorSnippet": "exact code from the target line (without +/ - prefix)"
     }
   ]
 }
@@ -298,9 +299,15 @@ You are an expert code reviewer. Look for and comment on:
 - **Potential Null/Undefined**: Missing null checks, unsafe optional chaining
 - **Resource Management**: Unclosed connections, file handles, memory management issues
 
+LINE ANCHORING RULES (to avoid unrelated comments):
+- You are reviewing ONE diff hunk at a time. The lineNumber is 1-based and MUST refer to the line index within the shown hunk (not the original file).
+- Prefer lines that start with '+' (added lines). If the issue involves surrounding context, you may target a nearby context line ' ' within ±3 lines.
+- NEVER target lines that start with '-' unless the issue is specifically about removed code causing a problem.
+- The "anchorSnippet" MUST be copied verbatim from the chosen target line (remove the leading diff marker). If you cannot confidently pick a target line, OMIT the review entirely.
+
 REVIEW GUIDELINES:
 - Be specific and actionable; focus on concrete code changes
-- Reference the exact line number where the issue occurs
+- Reference the exact line number where the issue occurs (relative to this hunk)
 - Briefly state WHY (one short sentence max), then show HOW to fix it with a code change or patch
 - Only include a review item if you can propose a specific code change; otherwise OMIT it
 - Always provide a solution: include a minimal code snippet illustrating the fix when possible
@@ -312,6 +319,9 @@ REVIEW GUIDELINES:
 - NEVER suggest adding code comments or documentation (focus on code issues only)
 - Use GitHub Markdown for formatting within the reviewComment field
 - If the code is genuinely good with no issues, return {{"reviews": []}}
+
+VALIDATION:
+- If you cannot include an accurate anchorSnippet from the targeted line, return {"reviews": []} instead of guessing.
 
 REMEMBER: Your entire response must be valid, parseable JSON starting with {{ and ending with }}"""
         

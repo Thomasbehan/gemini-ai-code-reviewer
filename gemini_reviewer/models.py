@@ -125,6 +125,7 @@ class AIResponse:
     priority: ReviewPriority = ReviewPriority.MEDIUM
     category: Optional[str] = None
     confidence: Optional[float] = None
+    anchor_snippet: Optional[str] = None
 
 
 @dataclass

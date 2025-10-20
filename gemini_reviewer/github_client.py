@@ -11,6 +11,7 @@ import requests
 import hashlib
 import re
 from typing import List, Dict, Any, Optional, Set
+import difflib
 from github import Github
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -515,25 +516,96 @@ class GitHubClient:
             return set()
 
     def filter_out_existing_comments(self, pr_details: PRDetails, comments: List[ReviewComment]) -> List[ReviewComment]:
-        """Filter out comments that match signatures of existing PR comments; also dedupe within batch."""
+        """Filter out comments that match signatures of existing PR comments; also dedupe within batch.
+        Enhancements:
+        - Skip comments that were already posted (by checking hidden/body-based signatures).
+        - Within the current batch, collapse highly similar comments that target the same file+position.
+          Keep the highest-priority (or the longest body if priorities tie).
+        """
         try:
             existing = self.get_existing_comment_signatures(pr_details)
+
+            # Helpers
+            def priority_value(p):
+                try:
+                    from .models import ReviewPriority as _RP
+                    order = {
+                        _RP.CRITICAL: 4,
+                        _RP.HIGH: 3,
+                        _RP.MEDIUM: 2,
+                        _RP.LOW: 1,
+                    }
+                    return order.get(p, 1)
+                except Exception:
+                    return 1
+
             filtered: List[ReviewComment] = []
-            seen: Set[str] = set()
-            skipped = 0
+            seen_sigs: Set[str] = set()
+            # key: (path, position) -> index in filtered list
+            group_index: Dict[str, int] = {}
+            # store normalized bodies to compare similarity for the kept comment in each group
+            kept_norm_body: Dict[str, str] = {}
+
+            skipped_existing = 0
+            skipped_same_line = 0
+
             for cm in comments:
                 try:
                     sig = self._compute_signature(cm.path, cm.body)
-                    if sig in existing or sig in seen:
-                        skipped += 1
+                    if sig in existing or sig in seen_sigs:
+                        skipped_existing += 1
                         continue
-                    seen.add(sig)
+
+                    # Batch dedupe by same file+position with fuzzy body similarity
+                    pos = getattr(cm, 'position', None) or getattr(cm, 'line_number', None)
+                    key = f"{cm.path}::{pos}"
+                    norm_body = self._normalize_for_signature(cm.body)
+
+                    if key in group_index:
+                        idx = group_index[key]
+                        prev = filtered[idx]
+                        prev_norm = kept_norm_body.get(key, self._normalize_for_signature(prev.body))
+                        # Compute similarity ratio
+                        try:
+                            ratio = difflib.SequenceMatcher(None, prev_norm, norm_body).ratio()
+                        except Exception:
+                            ratio = 0.0
+                        similar = ratio >= 0.8 or (prev_norm and norm_body and (prev_norm in norm_body or norm_body in prev_norm))
+
+                        if similar:
+                            # Decide which one to keep
+                            keep_new = False
+                            if priority_value(cm.priority) > priority_value(prev.priority):
+                                keep_new = True
+                            elif priority_value(cm.priority) == priority_value(prev.priority) and len(cm.body or '') > len(prev.body or ''):
+                                keep_new = True
+
+                            if keep_new:
+                                filtered[idx] = cm
+                                kept_norm_body[key] = norm_body
+                                # Count as skipped because we replaced previous with better one
+                                skipped_same_line += 1
+                                seen_sigs.add(sig)
+                            else:
+                                skipped_same_line += 1
+                                seen_sigs.add(sig)
+                            continue
+                        # If not similar, allow multiple distinct comments on same line
+
+                    # First time seeing this position or not similar: keep it
+                    seen_sigs.add(sig)
+                    group_index[key] = len(filtered)
+                    kept_norm_body[key] = norm_body
                     filtered.append(cm)
+
                 except Exception:
                     # On any error, keep the comment rather than dropping it
                     filtered.append(cm)
-            if skipped > 0:
-                logger.info(f"Deduped comments: skipped {skipped} already-posted or duplicate comments; {len(filtered)} remain")
+
+            if skipped_existing > 0 or skipped_same_line > 0:
+                logger.info(
+                    f"Deduped comments: skipped {skipped_existing} already-posted/identical and {skipped_same_line} same-line duplicates; {len(filtered)} remain"
+                )
             return filtered
         except Exception as e:
             logger.debug(f"Deduplication failed (continuing without dedupe): {e}")

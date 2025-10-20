@@ -387,9 +387,34 @@ class GeminiClient:
                 return None
             comment = self._sanitize_text(comment)
             
-            # Require actionable fix: keep only comments that include code (inline or fenced) using backticks
-            if '`' not in comment:
-                logger.info("Discarding non-actionable review (no code snippet provided)")
+            # Optional: anchor snippet tying the comment to a concrete line
+            anchor_snippet = None
+            for k in ["anchorSnippet", "anchor", "snippet", "code", "anchorText"]:
+                if k in review and isinstance(review[k], str) and review[k].strip():
+                    anchor_snippet = review[k].strip()
+                    break
+            
+            # If not provided explicitly, try to infer from first inline code span using backticks
+            if not anchor_snippet and '`' in comment:
+                try:
+                    # Prefer shortest inline code span (single backticks) to reduce false matches
+                    import re as _re
+                    inline_matches = list(_re.finditer(r"`([^`\n]+)`", comment))
+                    if inline_matches:
+                        # pick the first non-trivial snippet
+                        for m in inline_matches:
+                            candidate = m.group(1).strip()
+                            if len(candidate) >= 2:
+                                anchor_snippet = candidate
+                                break
+                        if not anchor_snippet:
+                            anchor_snippet = inline_matches[0].group(1).strip()
+                except Exception:
+                    pass
+            
+            # Require actionable fix: keep only comments that include some code indication
+            if not anchor_snippet and '`' not in comment:
+                logger.info("Discarding non-actionable review (no code snippet/anchor provided)")
                 return None
             
             # Optional: priority/severity/level
@@ -430,7 +455,8 @@ class GeminiClient:
                 review_comment=comment,
                 priority=priority,
                 category=category,
-                confidence=confidence
+                confidence=confidence,
+                anchor_snippet=anchor_snippet
             )
             
         except Exception as e:
