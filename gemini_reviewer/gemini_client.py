@@ -387,6 +387,11 @@ class GeminiClient:
                 return None
             comment = self._sanitize_text(comment)
             
+            # Require actionable fix: keep only comments that include code (inline or fenced) using backticks
+            if '`' not in comment:
+                logger.info("Discarding non-actionable review (no code snippet provided)")
+                return None
+            
             # Optional: priority/severity/level
             priority_val = None
             for k in ["priority", "severity", "level", "rating"]:

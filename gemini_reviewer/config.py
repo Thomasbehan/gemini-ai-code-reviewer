@@ -302,8 +302,11 @@ REVIEW GUIDELINES:
 - Be specific and actionable; focus on concrete code changes
 - Reference the exact line number where the issue occurs
 - Briefly state WHY (one short sentence max), then show HOW to fix it with a code change or patch
+- Only include a review item if you can propose a specific code change; otherwise OMIT it
 - Always provide a solution: include a minimal code snippet illustrating the fix when possible
 - Do NOT ask for more information or additional context; propose the best fix with the given code
+- Do NOT praise, congratulate, or acknowledge good changes; only report problems
+- Avoid nitpicks and subjective style comments unless they impact correctness, security, or performance
 - Prioritize critical bugs and security issues as "high" or "critical"
 - Mark minor improvements as "low"
 - NEVER suggest adding code comments or documentation (focus on code issues only)

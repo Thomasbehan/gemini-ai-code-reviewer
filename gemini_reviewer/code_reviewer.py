@@ -87,10 +87,9 @@ class CodeReviewer:
             
             result.comments = comments
             
-            # Post a final positive review only if there are no comments at all
+            # If there are no comments at all, skip creating a review to avoid noise
             if len(comments) == 0:
-                logger.info("No comments generated across all files - posting a final positive review.")
-                await self._create_github_review(pr_details, comments, preferred_event="COMMENT")
+                logger.info("No comments generated across all files - skipping review creation to avoid noise.")
             else:
                 # Per-file reviews have already been posted; skip aggregated final review to avoid large payloads.
                 logger.info("Per-file reviews posted; skipping aggregated final review to avoid large payloads.")
@@ -477,6 +476,11 @@ class CodeReviewer:
             
             # Filter comments by priority if configured
             filtered_comments = self._filter_comments_by_priority(comments)
+            
+            # If there are no issues at all, skip creating a review to avoid noise
+            if total_comments == 0 and not filtered_comments:
+                logger.info("No issues found - skipping review creation to avoid noise")
+                return True
             
             # Determine review event
             # Note: Using COMMENT instead of APPROVE because GitHub Actions tokens
