@@ -443,16 +443,27 @@ class CodeReviewer:
             return None
     
     async def _build_project_context(self, diff_file: DiffFile, related_files: List[str], pr_details: PRDetails) -> Optional[str]:
-        """Build project context by fetching related file contents."""
-        if not related_files:
-            return None
-        
+        """Build project context including previous comments and related file contents."""
         context_parts = []
         max_context_size = 8000  # Limit total context to avoid token bloat
         current_size = 0
         
         try:
-            for related_file in related_files:
+            # Always include previous inline comments on this file (if any)
+            try:
+                prev = self.github_client.get_file_review_comments(pr_details, diff_file.file_info.path, limit=30)
+                if prev:
+                    # Keep this small; it helps verify resolutions
+                    snippet = prev
+                    if len(snippet) > 2000:
+                        snippet = snippet[:2000] + "\n... (truncated)"
+                    context_parts.append(f"### Previous review history for {diff_file.file_info.path}\n{snippet}\n")
+                    current_size += len(snippet)
+            except Exception:
+                pass
+            
+            # Related files content
+            for related_file in related_files or []:
                 if current_size >= max_context_size:
                     break
                 
@@ -473,7 +484,7 @@ class CodeReviewer:
                     current_size += len(content)
             
             if context_parts:
-                logger.info(f"Built project context with {len(context_parts)} related files ({current_size} chars)")
+                logger.info(f"Built project context with {len(context_parts)} block(s) (~{current_size} chars)")
                 return "\n".join(context_parts)
                 
         except Exception as e:

@@ -247,7 +247,8 @@ class GitHubClient:
                 return None
             
             # Find the latest review/comment with our marker from a github-action author
-            marker_regex = re.compile(r"Gemini AI Code Review", re.IGNORECASE)
+            # Support both "Gemini AI Code Reviewer" and legacy "Gemini AI Code Review"
+            marker_regex = re.compile(r"Gemini AI Code Review(?:er)?", re.IGNORECASE)
             latest_review_time = None
             latest_review_source = None
             
@@ -353,39 +354,40 @@ class GitHubClient:
         
     def get_pr_diff_since(self, pr_details: PRDetails, base_sha: str) -> Optional[str]:
         """Fetch a diff of changes since a given base SHA up to the PR head.
-        Uses GitHub compare API.
+        Primary strategy: GitHub compare API.
+        Fallback: build incremental diff by iterating PR commits after base_sha.
         
         Returns:
         - Diff text string if there are new changes
         - Empty string "" if no new changes (prevents re-reviewing entire codebase)
         - None only if base_sha is not provided (first review, should fetch full PR diff)
         
-        This ensures we NEVER fall back to reviewing the entire codebase after the first review.
-        If the compare API fails or returns empty, we return "" to indicate no new changes.
+        This ensures we NEVER re-review the entire codebase unnecessarily and
+        we also don't miss changes when the compare API fails (e.g., synthetic
+        merge SHAs or history quirks).
         """
         try:
             if not base_sha:
                 return None
             
             # Re-fetch the PR to get the most current head SHA
-            # This ensures we don't miss new commits due to stale data
             try:
                 repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
                 pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
                 current_head_sha = pr.head.sha
                 
-                # Also get the actual latest commit from the commit list as a double-check
+                # Also verify against the latest commit from the list
                 try:
                     all_commits = list(pr.get_commits())
                     if all_commits:
                         actual_latest_sha = getattr(all_commits[-1], 'sha', None)
                         if actual_latest_sha and actual_latest_sha != current_head_sha:
-                            logger.warning(f"PR head.sha ({current_head_sha[:7]}) differs from latest commit in list ({actual_latest_sha[:7]})")
-                            # Use the actual latest commit from the list as it's more reliable
+                            logger.warning(
+                                f"PR head.sha ({current_head_sha[:7]}) differs from latest commit in list ({actual_latest_sha[:7]})"
+                            )
                             current_head_sha = actual_latest_sha
                 except Exception as e:
                     logger.debug(f"Could not verify head SHA from commit list: {e}")
-                
             except Exception as e:
                 logger.warning(f"Could not re-fetch PR for current head SHA, using pr_details.head_sha: {e}")
                 current_head_sha = pr_details.head_sha
@@ -393,33 +395,27 @@ class GitHubClient:
                     logger.warning("Could not determine current head SHA; treating as no new changes")
                     return ""
             
-            # Note on GITHUB_SHA: In GitHub Actions this often points to a synthetic merge commit
-            # for refs/pull/*/merge which is not part of the PR branch history. Comparing a PR
-            # branch commit to this synthetic merge frequently returns 404 from the compare API.
-            # To avoid false "no changes" results and accidental full re-reviews, we intentionally
-            # ignore GITHUB_SHA here and rely solely on the PR's commit list/head.
+            # Ignore GITHUB_SHA because it can be a synthetic merge
             github_sha = os.getenv('GITHUB_SHA')
             if github_sha and github_sha != current_head_sha:
                 logger.info(
                     "GITHUB_SHA differs from PR head (likely a synthetic merge); ignoring for incremental diff"
                 )
-            elif github_sha:
-                logger.debug("GITHUB_SHA equals PR head; proceeding with PR head from API")
-            else:
-                logger.debug("GITHUB_SHA not available in environment")
             
             repo_name = pr_details.repo_full_name
             
-            # Log the comparison details
             logger.info(f"Comparing: base_sha={base_sha[:7]}... vs current_head_sha={current_head_sha[:7]}...")
             if pr_details.head_sha and pr_details.head_sha != current_head_sha:
-                logger.info(f"Note: pr_details.head_sha ({pr_details.head_sha[:7]}) differs from current head ({current_head_sha[:7]})")
+                logger.info(
+                    f"Note: pr_details.head_sha ({pr_details.head_sha[:7]}) differs from current head ({current_head_sha[:7]})"
+                )
             
             # If base equals head, nothing to review
             if base_sha == current_head_sha:
                 logger.info("Base SHA equals current head; no new changes to review.")
                 return ""
             
+            # Try compare API first
             api_url = f"{self.config.api_base_url}/repos/{repo_name}/compare/{base_sha}...{current_head_sha}.diff"
             diff_headers = {'Accept': 'application/vnd.github.v3.diff'}
             logger.info(f"Fetching incremental diff: {base_sha[:7]}... to {current_head_sha[:7]}...")
@@ -428,15 +424,110 @@ class GitHubClient:
             if resp.status_code == 200:
                 text = resp.text or ""
                 if text.strip() == "":
-                    logger.info("Incremental compare returned empty diff; no new changes to review.")
-                    return ""
-                return text
+                    logger.info("Incremental compare returned empty diff; will try per-commit fallback.")
+                else:
+                    return text
             else:
-                logger.warning(f"Compare API failed with {resp.status_code}; treating as no new changes to avoid re-reviewing entire codebase.")
-                return ""
-                
+                logger.warning(
+                    f"Compare API failed with {resp.status_code}; attempting per-commit fallback."
+                )
+            
+            # Fallback: build incremental diff by iterating commits after base_sha
+            fallback = self.get_incremental_diff_by_commits(pr_details, base_sha)
+            return fallback if fallback is not None else ""
         except Exception as e:
-            logger.warning(f"Failed to get incremental diff: {e}; treating as no new changes to avoid re-reviewing entire codebase.")
+            logger.warning(
+                f"Failed to get incremental diff: {e}; will treat as no new changes to avoid re-reviewing entire codebase."
+            )
+            return ""
+
+    def get_incremental_diff_by_commits(self, pr_details: PRDetails, base_sha: str) -> Optional[str]:
+        """Fallback incremental diff: concatenate patches for commits after base_sha.
+        Steps:
+        1. Find commits on the PR after base_sha.
+        2. For each commit, fetch its file patches.
+        3. Build a minimal unified diff per file and concatenate.
+        Returns "" if there are no commits since base_sha.
+        Returns None if base_sha is falsy (caller can decide to fetch full PR diff).
+        """
+        if not base_sha:
+            return None
+        try:
+            repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
+            pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
+            commits = list(pr.get_commits())
+            if not commits:
+                logger.info("No commits found on PR while building fallback incremental diff")
+                return ""
+            
+            # Identify position of base_sha in the PR commits
+            base_index = None
+            for idx, c in enumerate(commits):
+                try:
+                    if getattr(c, 'sha', None) == base_sha:
+                        base_index = idx
+                        break
+                except Exception:
+                    continue
+            
+            # If base_sha not found, we still try to use commit timestamps from last review
+            if base_index is None:
+                logger.warning("Base SHA not found in PR commit list; will include all commits as a conservative fallback")
+                start_idx = 0
+            else:
+                start_idx = base_index + 1
+            
+            commits_after = commits[start_idx:]
+            logger.info(f"Found {len(commits_after)} commit(s) after base_sha for fallback diff")
+            if len(commits_after) == 0:
+                return ""
+            
+            parts: List[str] = []
+            for c in commits_after:
+                sha = getattr(c, 'sha', None)
+                if not sha:
+                    continue
+                try:
+                    gh_commit = repo_obj.get_commit(sha)
+                    # Each file has attributes: filename, status, patch, previous_filename (for renamed)
+                    for f in getattr(gh_commit, 'files', []) or []:
+                        patch = getattr(f, 'patch', None)
+                        status = getattr(f, 'status', '') or ''
+                        filename = getattr(f, 'filename', '') or ''
+                        prev = getattr(f, 'previous_filename', None)
+                        # Skip binary files (patch is None)
+                        if not patch or not filename:
+                            continue
+                        # Build unified diff headers
+                        if status == 'added':
+                            diff_header = f"diff --git a/{filename} b/{filename}\n"
+                            from_header = f"--- /dev/null\n"
+                            to_header = f"+++ b/{filename}\n"
+                        elif status == 'removed':
+                            diff_header = f"diff --git a/{filename} b/{filename}\n"
+                            from_header = f"--- a/{filename}\n"
+                            to_header = f"+++ /dev/null\n"
+                        elif status == 'renamed' and prev:
+                            diff_header = f"diff --git a/{prev} b/{filename}\n"
+                            from_header = f"--- a/{prev}\n"
+                            to_header = f"+++ b/{filename}\n"
+                        else:
+                            diff_header = f"diff --git a/{filename} b/{filename}\n"
+                            from_header = f"--- a/{filename}\n"
+                            to_header = f"+++ b/{filename}\n"
+                        parts.append(diff_header + from_header + to_header + patch + "\n")
+                except Exception as e:
+                    logger.debug(f"Failed to fetch commit {sha[:7]} for fallback diff: {e}")
+                    continue
+            
+            combined = "".join(parts)
+            if not combined.strip():
+                logger.info("Fallback per-commit diff produced no content (possibly only binary changes)")
+                return ""
+            logger.info(f"Built fallback incremental diff with {len(parts)} file patch(es)")
+            return combined
+        except Exception as e:
+            logger.warning(f"Error while building fallback incremental diff: {e}")
             return ""
 
     
@@ -753,6 +844,39 @@ class GitHubClient:
         except Exception as e:
             logger.debug(f"Deduplication failed (continuing without dedupe): {e}")
             return comments
+
+    def get_file_review_comments(self, pr_details: PRDetails, file_path: str, limit: int = 30) -> Optional[str]:
+        """Get previous inline review comments for a specific file in the PR.
+        Returns a formatted plain-text summary or None if none found.
+        """
+        try:
+            repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
+            pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
+            comments = []
+            for c in pr.get_review_comments():
+                try:
+                    path = getattr(c, 'path', None)
+                    if path != file_path:
+                        continue
+                    body = getattr(c, 'body', '') or ''
+                    author = getattr(getattr(c, 'user', None), 'login', '') or 'unknown'
+                    created = getattr(c, 'created_at', None)
+                    created_str = created.isoformat() if getattr(created, 'isoformat', None) else str(created)
+                    if not body:
+                        continue
+                    comments.append((created, f"[{created_str}] {author}: {body}"))
+                except Exception:
+                    continue
+            if not comments:
+                return None
+            # Sort by created time and keep last N, but present most recent first
+            comments.sort(key=lambda x: x[0] or 0)
+            formatted = [c[1] for c in comments[-limit:]][::-1]
+            header = f"Previous inline review comments on {file_path} (most recent first):\n"
+            return header + "\n".join(f"- {line}" for line in formatted)
+        except Exception as e:
+            logger.debug(f"Failed to fetch previous comments for {file_path}: {e}")
+            return None
 
     def get_repository_info(self, owner: str, repo: str) -> Dict[str, Any]:
         """Get repository information."""
