@@ -215,186 +215,153 @@ class GitHubClient:
             raise GitHubClientError(f"Failed to fetch diff: {str(e)}")
         
     def get_last_reviewed_commit_sha(self, pr_details: PRDetails) -> Optional[str]:
-        """Best-effort detection of the last commit SHA this bot/user has reviewed on the PR.
-        Strategy (more reliable):
-        - Prefer the most recent inline review comment authored by this bot (or containing our hidden AI signature).
-        - Fall back to PR reviews authored by this bot (summary reviews) if no suitable inline comment is found.
-        - If still not found, look for the latest PR issue comment containing the marker "Gemini AI Code Review"
-          (e.g., "🤖 **Gemini AI Code Review**") and map its timestamp to the latest commit at or before that time.
-        - If the authenticated user cannot be determined, also consider comments authored by candidate bot logins
-          (GITHUB_ACTOR and github-actions[bot]) in addition to signed comments.
-        Returns SHA or None if not found.
+        """Simplified detection of the last commit reviewed by this bot.
+        
+        Strategy:
+        1. Find the LATEST review or comment containing "Gemini AI Code Review" marker
+        2. Only consider authors with "github-action" in their username
+        3. Get all commits on the PR
+        4. Return the first commit SHA that came AFTER the review/comment timestamp
+        
+        This ensures we only review NEW commits since the last bot review,
+        preventing endless cycles and never re-reviewing the entire codebase.
+        
+        Returns: SHA of the last reviewed commit, or None if no prior review found.
         """
         try:
             repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
             pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
-
-            # Log all commits on the PR for debugging and get the actual latest commit
-            actual_latest_commit_sha = None
-            github_sha = os.getenv('GITHUB_SHA')
+            
+            # Get all commits on the PR (we'll need this for timestamp mapping)
             try:
                 all_commits = list(pr.get_commits())
-                logger.info(f"PR has {len(all_commits)} commit(s):")
-                for c in all_commits[-5:]:  # Show last 5 commits
-                    try:
-                        sha = getattr(c, 'sha', 'unknown')
-                        commit_obj = getattr(c, 'commit', None)
-                        author = getattr(commit_obj, 'author', None) if commit_obj else None
-                        commit_date = getattr(author, 'date', None) if author else None
-                        message = (getattr(commit_obj, 'message', '') if commit_obj else '').split('\n')[0][:60]
-                        logger.info(f"  - {sha[:7]} at {commit_date}: {message}")
-                    except Exception:
-                        pass
-                # Get the actual latest commit SHA from the commit list
+                logger.info(f"PR has {len(all_commits)} commit(s)")
                 if all_commits:
-                    actual_latest_commit_sha = getattr(all_commits[-1], 'sha', None)
-                    logger.info(f"Actual latest commit from commit list: {actual_latest_commit_sha[:7] if actual_latest_commit_sha else 'unknown'}")
-                    logger.info(f"PR head.sha from PR object: {pr_details.head_sha[:7] if pr_details.head_sha else 'unknown'}")
-                    if github_sha:
-                        logger.info(f"GITHUB_SHA from environment: {github_sha[:7] if len(github_sha) > 7 else github_sha}")
-                    if actual_latest_commit_sha and pr_details.head_sha and actual_latest_commit_sha != pr_details.head_sha:
-                        logger.warning(f"MISMATCH: PR head.sha differs from actual latest commit!")
-            except Exception:
-                pass
-
-            # Determine current authenticated user login and candidate bot logins
+                    logger.info(f"Latest commit: {all_commits[-1].sha[:7]} at {all_commits[-1].commit.author.date}")
+            except Exception as e:
+                logger.warning(f"Could not retrieve commit list: {e}")
+                return None
+            
+            if not all_commits:
+                logger.info("No commits found on PR")
+                return None
+            
+            # Find the latest review/comment with our marker from a github-action author
+            marker_regex = re.compile(r"Gemini AI Code Review", re.IGNORECASE)
+            latest_review_time = None
+            latest_review_source = None
+            
+            # Check PR reviews (these have bodies with our marker)
             try:
-                me = self._client.get_user()
-                my_login = getattr(me, 'login', None)
-            except Exception:
-                my_login = None
-            actor = os.getenv('GITHUB_ACTOR') or None
-            candidate_logins: Set[str] = set(filter(None, [my_login, actor, 'github-actions[bot]', 'github-actions']))
-            logger.info(f"Bot identification: my_login={my_login}, candidates={candidate_logins}")
-
-            latest_sha: Optional[str] = None
-            latest_time = None
-            source = None  # 'comment' | 'review' | 'issue-comment'
-
-            # 1) Prefer inline review comments (most accurate signal)
-            try:
-                for c in pr.get_review_comments():
+                for review in pr.get_reviews():
                     try:
-                        body = getattr(c, 'body', '') or ''
-                        author = getattr(getattr(c, 'user', None), 'login', None)
-                        has_sig = re.search(r'<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->', body, flags=re.IGNORECASE) is not None
-
-                        # Decide if we should trust this comment as authored by us
-                        trust = False
-                        if my_login and author == my_login:
-                            trust = True
-                        elif has_sig:
-                            trust = True
-                        elif author and author in candidate_logins:
-                            trust = True
-
-                        if not trust:
+                        author_login = getattr(review.user, 'login', '') or ''
+                        body = getattr(review, 'body', '') or ''
+                        submitted_at = getattr(review, 'submitted_at', None)
+                        
+                        # Only consider github-action authors with our marker
+                        if 'github-action' not in author_login.lower():
                             continue
-
-                        commit_id = getattr(c, 'commit_id', None)
-                        created_at = getattr(c, 'created_at', None)
-                        if commit_id and (latest_time is None or (created_at and created_at > latest_time)):
-                            latest_time = created_at
-                            latest_sha = commit_id
-                            source = 'comment'
-                            logger.debug(f"Found inline review comment by {author} at {created_at} on commit {commit_id[:7]}")
+                        if not marker_regex.search(body):
+                            continue
+                        if not submitted_at:
+                            continue
+                        
+                        # Track the latest review
+                        if latest_review_time is None or submitted_at > latest_review_time:
+                            latest_review_time = submitted_at
+                            latest_review_source = f"PR review by {author_login}"
+                            logger.debug(f"Found review by {author_login} at {submitted_at}")
                     except Exception:
                         continue
-            except Exception:
-                pass
-
-            # 2) Fallback: PR reviews authored by us
-            if latest_sha is None:
-                try:
-                    marker_regex = re.compile(r"Gemini AI Code Review", re.IGNORECASE)
-                    for rv in pr.get_reviews():
-                        try:
-                            author_login = getattr(rv.user, 'login', None)
-                            commit_id = getattr(rv, 'commit_id', None)
-                            submitted_at = getattr(rv, 'submitted_at', None)
-                            body = getattr(rv, 'body', '') or ''
-
-                            # Decide if we should trust this review as authored by us
-                            trust = False
-                            if my_login and author_login == my_login:
-                                # We know our login and it matches
-                                trust = True
-                            elif not my_login:
-                                # Token might have changed; trust only if marker is present or author is a candidate login
-                                if marker_regex.search(body):
-                                    trust = True
-                                elif author_login and author_login in candidate_logins:
-                                    trust = True
-                            
-                            if not trust:
-                                continue
-
-                            # Prefer direct commit_id if present
-                            if commit_id and (latest_time is None or (submitted_at and submitted_at > latest_time)):
-                                latest_time = submitted_at
-                                latest_sha = commit_id
-                                source = 'review'
-                                logger.debug(f"Found PR review by {author_login} at {submitted_at} on commit {commit_id[:7]}")
-                                continue
-
-                            # Otherwise, if the body contains our marker, map by timestamp
-                            if marker_regex.search(body) and submitted_at:
-                                base_sha = self._find_latest_commit_sha_before(pr, submitted_at)
-                                if base_sha and (latest_time is None or submitted_at > latest_time):
-                                    latest_time = submitted_at
-                                    latest_sha = base_sha
-                                    source = 'review'
-                                    logger.debug(f"Found PR review by {author_login} at {submitted_at}, mapped to commit {base_sha[:7]}")
-                        except Exception:
+            except Exception as e:
+                logger.debug(f"Error scanning PR reviews: {e}")
+            
+            # Check issue comments (may also contain our marker)
+            try:
+                for comment in pr.as_issue().get_comments():
+                    try:
+                        author_login = getattr(getattr(comment, 'user', None), 'login', '') or ''
+                        body = getattr(comment, 'body', '') or ''
+                        created_at = getattr(comment, 'created_at', None)
+                        
+                        # Only consider github-action authors with our marker
+                        if 'github-action' not in author_login.lower():
                             continue
-                except Exception:
-                    pass
-
-            # 3) Fallback: Issue comments containing our visible marker
-            if latest_sha is None:
-                try:
-                    marker_regex = re.compile(r"Gemini AI Code Review", re.IGNORECASE)
-                    latest_marker_time = None
-                    for ic in pr.as_issue().get_comments():
-                        try:
-                            body = getattr(ic, 'body', '') or ''
-                            if not marker_regex.search(body):
-                                continue
-                            created_at = getattr(ic, 'created_at', None)
-                            if latest_marker_time is None or (created_at and created_at > latest_marker_time):
-                                latest_marker_time = created_at
-                        except Exception:
+                        if not marker_regex.search(body):
                             continue
-
-                    if latest_marker_time:
-                        # Map comment timestamp to the latest commit at or before that time
-                        base_sha = self._find_latest_commit_sha_before(pr, latest_marker_time)
-                        if base_sha:
-                            latest_sha = base_sha
-                            latest_time = latest_marker_time
-                            source = 'issue-comment'
-                            logger.debug(f"Found issue comment at {latest_marker_time}, mapped to commit {base_sha[:7]}")
+                        if not created_at:
+                            continue
+                        
+                        # Track the latest comment
+                        if latest_review_time is None or created_at > latest_review_time:
+                            latest_review_time = created_at
+                            latest_review_source = f"issue comment by {author_login}"
+                            logger.debug(f"Found comment by {author_login} at {created_at}")
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.debug(f"Error scanning issue comments: {e}")
+            
+            # If no prior review found, this is the first review
+            if latest_review_time is None:
+                logger.info("No prior bot review found - this is the first review")
+                return None
+            
+            logger.info(f"Latest bot review: {latest_review_source} at {latest_review_time}")
+            
+            # Find the last commit at or before the review time
+            # This is the commit that was reviewed
+            last_reviewed_sha = None
+            for commit in all_commits:
+                try:
+                    sha = getattr(commit, 'sha', None)
+                    commit_obj = getattr(commit, 'commit', None)
+                    # Use committer date (when it was added to the branch)
+                    committer = getattr(commit_obj, 'committer', None) if commit_obj else None
+                    commit_time = getattr(committer, 'date', None) if committer else None
+                    
+                    # Fallback to author date if committer date not available
+                    if not commit_time:
+                        author = getattr(commit_obj, 'author', None) if commit_obj else None
+                        commit_time = getattr(author, 'date', None) if author else None
+                    
+                    if not sha or not commit_time:
+                        continue
+                    
+                    # If this commit was made at or before the review time, it was reviewed
+                    if commit_time <= latest_review_time:
+                        last_reviewed_sha = sha
+                        logger.debug(f"Commit {sha[:7]} at {commit_time} was at or before review time")
+                    else:
+                        # We've found the first commit after the review
+                        logger.debug(f"Commit {sha[:7]} at {commit_time} came after review time")
+                        break
                 except Exception:
-                    pass
-
-            if latest_sha:
-                logger.info(f"Detected last reviewed commit by this bot from {source}: {latest_sha} (at {latest_time})")
+                    continue
+            
+            if last_reviewed_sha:
+                logger.info(f"Last reviewed commit: {last_reviewed_sha[:7]}")
+                return last_reviewed_sha
             else:
-                logger.info("No prior bot review activity detected on this PR.")
-            return latest_sha
+                logger.warning("Could not map review timestamp to any commit")
+                return None
+                
         except Exception as e:
-            logger.debug(f"Could not determine last reviewed commit: {e}")
+            logger.warning(f"Error determining last reviewed commit: {e}")
             return None
         
     def get_pr_diff_since(self, pr_details: PRDetails, base_sha: str) -> Optional[str]:
         """Fetch a diff of changes since a given base SHA up to the PR head.
-        Uses GitHub compare API. Returns diff text or None on failure.
+        Uses GitHub compare API.
         
-        Re-fetches the PR to ensure we're comparing against the most current head commit,
-        not potentially stale data from when pr_details was first created.
+        Returns:
+        - Diff text string if there are new changes
+        - Empty string "" if no new changes (prevents re-reviewing entire codebase)
+        - None only if base_sha is not provided (first review, should fetch full PR diff)
         
-        When running in GitHub Actions, also checks GITHUB_SHA which may contain a merge
-        commit SHA if the PR was checked out with a merge ref.
+        This ensures we NEVER fall back to reviewing the entire codebase after the first review.
+        If the compare API fails or returns empty, we return "" to indicate no new changes.
         """
         try:
             if not base_sha:
@@ -423,7 +390,8 @@ class GitHubClient:
                 logger.warning(f"Could not re-fetch PR for current head SHA, using pr_details.head_sha: {e}")
                 current_head_sha = pr_details.head_sha
                 if not current_head_sha:
-                    return None
+                    logger.warning("Could not determine current head SHA; treating as no new changes")
+                    return ""
             
             # Check GITHUB_SHA environment variable - may contain merge commit SHA
             github_sha = os.getenv('GITHUB_SHA')
@@ -446,52 +414,26 @@ class GitHubClient:
             if base_sha == current_head_sha:
                 logger.info("Base SHA equals current head; no new changes to review.")
                 return ""
+            
             api_url = f"{self.config.api_base_url}/repos/{repo_name}/compare/{base_sha}...{current_head_sha}.diff"
             diff_headers = {'Accept': 'application/vnd.github.v3.diff'}
             logger.info(f"Fetching incremental diff: {base_sha[:7]}... to {current_head_sha[:7]}...")
             resp = self._session.get(api_url, headers=diff_headers, timeout=self.config.timeout)
+            
             if resp.status_code == 200:
                 text = resp.text or ""
                 if text.strip() == "":
-                    # Empty diff from compare API; fall back to full PR diff to avoid false "no changes"
-                    logger.info("Incremental compare returned empty diff; falling back to full PR diff.")
-                    return None
+                    logger.info("Incremental compare returned empty diff; no new changes to review.")
+                    return ""
                 return text
             else:
-                logger.warning(f"Compare API failed with {resp.status_code}; falling back to full PR diff.")
-                return None
+                logger.warning(f"Compare API failed with {resp.status_code}; treating as no new changes to avoid re-reviewing entire codebase.")
+                return ""
+                
         except Exception as e:
-            logger.debug(f"Failed to get incremental diff: {e}")
-            return None
+            logger.warning(f"Failed to get incremental diff: {e}; treating as no new changes to avoid re-reviewing entire codebase.")
+            return ""
 
-    def _find_latest_commit_sha_before(self, pr, timestamp) -> Optional[str]:
-        """Find the latest commit SHA on the PR with commit time <= timestamp.
-        We consider committer date first, then author date as fallback.
-        """
-        try:
-            latest = None
-            latest_time = None
-            for c in pr.get_commits():
-                try:
-                    sha = getattr(c, 'sha', None)
-                    commit = getattr(c, 'commit', None)
-                    committer = getattr(commit, 'committer', None) if commit else None
-                    author = getattr(commit, 'author', None) if commit else None
-                    commit_time = None
-                    if committer and getattr(committer, 'date', None):
-                        commit_time = committer.date
-                    elif author and getattr(author, 'date', None):
-                        commit_time = author.date
-                    if not sha or not commit_time:
-                        continue
-                    if commit_time <= timestamp and (latest_time is None or commit_time > latest_time):
-                        latest = sha
-                        latest_time = commit_time
-                except Exception:
-                    continue
-            return latest
-        except Exception:
-            return None
     
     @retry(
         stop=stop_after_attempt(2),
