@@ -660,9 +660,12 @@ class CodeReviewer:
             
             # Filter comments by priority if configured
             filtered_comments = self._filter_comments_by_priority(comments)
+
+            # Apply per-file and total caps to reduce noise
+            limited_comments = self._apply_comment_limits(filtered_comments)
             
             # If there are no issues at all, skip creating a review to avoid noise
-            if total_comments == 0 and not filtered_comments:
+            if total_comments == 0 and not limited_comments:
                 logger.info("No issues found - skipping review creation to avoid noise")
                 return True
             
@@ -671,31 +674,31 @@ class CodeReviewer:
             # are not permitted to approve pull requests (GitHub API restriction)
             if preferred_event:
                 event = preferred_event
-                if filtered_comments:
-                    logger.info(f"Using preferred event '{event}' for {len(filtered_comments)} comments")
+                if limited_comments:
+                    logger.info(f"Using preferred event '{event}' for {len(limited_comments)} comments")
                 else:
                     logger.info(f"Using preferred event '{event}' with no comments")
             else:
-                if not filtered_comments:
+                if not limited_comments:
                     if total_comments > 0:
-                        logger.info(f"All {total_comments} comments were filtered by priority threshold - posting comment about this")
+                        logger.info(f"All {total_comments} comments were filtered by threshold/limits - posting comment about this")
                         event = "COMMENT"
                     else:
                         logger.info("No comments generated - posting positive review")
                         event = "COMMENT"
                 else:
-                    logger.info(f"Found {len(filtered_comments)} comments (out of {total_comments} total) - requesting changes")
+                    logger.info(f"Found {len(limited_comments)} comments (out of {total_comments} after dedupe) - requesting changes")
                     event = "REQUEST_CHANGES"
             
             # Pass both total and filtered comments so summary can be accurate
             success = self.github_client.create_review(
                 pr_details, 
-                filtered_comments, 
+                limited_comments, 
                 event,
                 total_comments_generated=total_comments
             )
             if success:
-                if filtered_comments:
+                if limited_comments:
                     logger.info("✅ Successfully created GitHub review")
                 else:
                     logger.info("✅ Successfully posted review")
@@ -731,6 +734,61 @@ class CodeReviewer:
                        f"based on priority threshold ({self.config.review.priority_threshold.value})")
         
         return filtered_comments
+    
+    def _apply_comment_limits(self, comments: List[ReviewComment]) -> List[ReviewComment]:
+        """Apply per-file and total comment caps to reduce noise.
+        Keeps highest-priority items first and preserves stable ordering among equals.
+        """
+        if not comments:
+            return []
+        
+        # Map priority to numeric for sorting
+        priority_order = {
+            ReviewPriority.CRITICAL: 4,
+            ReviewPriority.HIGH: 3,
+            ReviewPriority.MEDIUM: 2,
+            ReviewPriority.LOW: 1
+        }
+        
+        per_file_cap = max(0, int(getattr(self.config.review, 'max_comments_per_file', 0)))
+        total_cap = max(0, int(getattr(self.config.review, 'max_comments_total', 0)))
+        
+        # If no caps configured, return as-is
+        if per_file_cap == 0 and total_cap == 0:
+            return comments
+        
+        # Group by file
+        by_file: Dict[str, List[ReviewComment]] = {}
+        for cm in comments:
+            by_file.setdefault(cm.path, []).append(cm)
+        
+        # For determinism, within each file, sort by priority (desc) but keep stable original order for ties
+        def sort_key(cm: ReviewComment):
+            return (-priority_order.get(cm.priority, 1))
+        
+        selected: List[ReviewComment] = []
+        dropped_due_to_file_cap = 0
+        for path, group in by_file.items():
+            if per_file_cap > 0 and len(group) > per_file_cap:
+                sorted_group = sorted(group, key=sort_key)
+                kept = sorted_group[:per_file_cap]
+                dropped_due_to_file_cap += len(group) - len(kept)
+                selected.extend(kept)
+            else:
+                selected.extend(sorted(group, key=sort_key))
+        
+        if dropped_due_to_file_cap:
+            logger.info(f"Applied per-file cap: dropped {dropped_due_to_file_cap} comments exceeding {per_file_cap}/file")
+        
+        # Apply total cap across all files
+        if total_cap > 0 and len(selected) > total_cap:
+            # Sort globally by priority, stable among equals by original relative order (already grouped)
+            selected_sorted = sorted(selected, key=sort_key)
+            limited = selected_sorted[:total_cap]
+            logger.info(f"Applied total cap: reduced {len(selected)} to {len(limited)} comments (cap={total_cap})")
+            return limited
+        
+        return selected
     
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive processing statistics."""

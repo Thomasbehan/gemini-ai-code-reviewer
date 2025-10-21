@@ -137,6 +137,25 @@ jobs:
 - **GEMINI_API_KEY**: Your Google Gemini API key (store this as a GitHub Secret)
 
 ### Optional Parameters
+
+#### Noise Control and Limits
+- MAX_COMMENTS_TOTAL: Optional hard cap on the total number of review comments posted per run (default: 0 = disabled).
+- MAX_COMMENTS_PER_FILE: Optional cap on the number of comments per file (default: 0 = disabled).
+- REVIEW_PRIORITY_THRESHOLD: Only post comments at or above this priority. One of: low, medium, high, critical. Example: high.
+- REVIEW_MODE: Controls strictness. Options: strict, standard, lenient, security_focused, performance_focused. For fewer comments use lenient.
+
+Example usage in workflow inputs (maps to env):
+```yaml
+- uses: Thomasbehan/gemini-ai-code-reviewer@main
+  with:
+    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    EXCLUDE: "*.md,*.txt,package-lock.json,*.yml,*.yaml"
+    MAX_COMMENTS_TOTAL: 12
+    MAX_COMMENTS_PER_FILE: 4
+    REVIEW_PRIORITY_THRESHOLD: high
+    REVIEW_MODE: lenient
+```
 - **GEMINI_MODEL**: The Gemini model to use for code review (default: `gemini-2.5-flash`)
   - `gemini-2.5-flash` is a next-generation model offering speed and multimodal generation capabilities. It's suitable for a wide variety of tasks, including code generation, data extraction, and text editing.
   - `gemini-2.5-pro` offers enhanced capabilities with longer context windows and better reasoning for complex code reviews.
@@ -162,14 +181,14 @@ jobs:
 
 The action is configured for **maximum precision and deterministic output** to provide consistent, focused code reviews:
 
-- **Temperature**: `0.2` (default) - Lower temperature produces more precise, deterministic responses. The model focuses on the most likely correct answers rather than exploring creative alternatives.
+- **Temperature**: `0.0` (default) - Lowest temperature for ultra-precise, deterministic responses. The model focuses on the most likely correct answers rather than exploring creative alternatives.
 - **Top P**: `0.9` (default) - Slightly lower nucleus sampling for more focused output.
 - **Max Output Tokens**: `8192` - Fully utilizes Gemini 2.5's output capacity for comprehensive reviews.
 
 These settings can be overridden via environment variables if you need different behavior:
 ```yaml
 env:
-  GEMINI_TEMPERATURE: "0.2"  # Range: 0.0 (deterministic) to 2.0 (creative)
+  GEMINI_TEMPERATURE: "0.0"  # Range: 0.0 (deterministic) to 2.0 (creative)
   GEMINI_TOP_P: "0.9"        # Range: 0.0 to 1.0
   GEMINI_MAX_TOKENS: "8192"  # Maximum output tokens
 ```

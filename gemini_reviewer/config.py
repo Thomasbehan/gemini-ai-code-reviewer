@@ -113,6 +113,9 @@ class ReviewConfig:
     review_docs: bool = False
     custom_prompt_template: Optional[str] = None
     priority_threshold: ReviewPriority = ReviewPriority.LOW
+    # Comment caps (optional). 0 disables limits (default behavior).
+    max_comments_total: int = 0
+    max_comments_per_file: int = 0
     
     def __post_init__(self):
         """Validate review configuration."""
@@ -236,7 +239,9 @@ class Config:
             review_test_files=os.environ.get("REVIEW_TEST_FILES", "false").lower() == "true",
             review_docs=os.environ.get("REVIEW_DOCS", "false").lower() == "true",
             custom_prompt_template=custom_prompt_template,
-            priority_threshold=priority_threshold
+            priority_threshold=priority_threshold,
+            max_comments_total=int(os.environ.get("MAX_COMMENTS_TOTAL", os.environ.get("INPUT_MAX_COMMENTS_TOTAL", "0"))),
+            max_comments_per_file=int(os.environ.get("MAX_COMMENTS_PER_FILE", os.environ.get("INPUT_MAX_COMMENTS_PER_FILE", "0")))
         )
         
         # Performance configuration
@@ -368,7 +373,18 @@ REMEMBER: Your entire response must be valid, parseable JSON starting with { and
         }
         
         focus_instruction = mode_specific_instructions.get(self.review.review_mode, "")
-        return base_prompt + focus_instruction
+
+        noise_control = """
+NOISE CONTROL, PRECISION, AND SATISFACTION:
+- Be ultra-precise and avoid false positives; if uncertain, omit the item.
+- Prefer the single most impactful fix over many small suggestions.
+- Avoid cascading recommendations (do not propose follow-up changes created by your own suggestion).
+- Do not suggest broad refactors, style nits, or renames unless they affect correctness, security, or performance.
+- Use any provided "Previous review history" to verify whether earlier issues are resolved. If they appear resolved, do NOT propose alternatives or new patterns.
+- If no material issues remain, respond exactly with {"reviews": []}.
+"""
+        
+        return base_prompt + noise_control + focus_instruction
     
     def should_review_file(self, file_path: str) -> bool:
         """Determine if a file should be reviewed based on configuration."""
