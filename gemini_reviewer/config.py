@@ -320,7 +320,7 @@ LINE ANCHORING RULES (to avoid unrelated comments):
 - NEVER target lines that start with '-' unless the issue is specifically about removed code causing a problem.
 - The "anchorSnippet" MUST be copied verbatim from the chosen target line (remove the leading diff marker). If you cannot confidently pick a target line, OMIT the review entirely.
 
-REVIEW GUIDELINES:
+EXTREMELY IMPORTANT REVIEW RULES:
 - Be specific and actionable; focus on concrete code changes
 - Reference the exact line number where the issue occurs (relative to this hunk)
 - Briefly state WHY (one short sentence max), then show HOW to fix it with a code change or patch

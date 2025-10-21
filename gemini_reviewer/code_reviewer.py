@@ -105,9 +105,16 @@ class CodeReviewer:
             
             result.comments = comments
             
-            # If there are no comments at all, skip creating a review to avoid noise
+            # If there are no comments at all, post an approval review to acknowledge the clean changes
             if len(comments) == 0:
-                logger.info("No comments generated across all files - skipping review creation to avoid noise.")
+                if self.stats.files_processed > 0:
+                    logger.info("No comments generated across all files - posting an approval review to acknowledge clean changes.")
+                    try:
+                        await self._create_github_review(pr_details, [], preferred_event="APPROVE")
+                    except Exception as _e:
+                        logger.debug(f"Could not create approval review: {_e}")
+                else:
+                    logger.info("No comments generated and no files were processed - skipping review creation.")
             else:
                 # Per-file reviews have already been posted; skip aggregated final review to avoid large payloads.
                 logger.info("Per-file reviews posted; skipping aggregated final review to avoid large payloads.")
