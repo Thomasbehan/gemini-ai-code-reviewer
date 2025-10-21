@@ -91,7 +91,9 @@ class CodeReviewer:
             # Filter files based on configuration
             filtered_files = await self._filter_files(diff_files)
             if not filtered_files:
-                result.errors.append("No files remaining after filtering")
+                logger.info("No files remaining after filtering; nothing to review.")
+                self.stats.end_time = time.time()
+                result.processing_time = self.stats.duration
                 return result
             
             result.processed_files = len(filtered_files)
