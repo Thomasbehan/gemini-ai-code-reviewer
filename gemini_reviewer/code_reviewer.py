@@ -216,10 +216,21 @@ class CodeReviewer:
         """Analyze files sequentially."""
         logger.info("Analyzing files sequentially...")
         
+        # Ensure we only analyze each file path once
+        unique_files: List[DiffFile] = []
+        seen_paths: Set[str] = set()
+        for df in diff_files:
+            p = df.file_info.path
+            if p not in seen_paths:
+                seen_paths.add(p)
+                unique_files.append(df)
+            else:
+                logger.debug(f"Skipping duplicate file entry: {p}")
+        
         all_comments = []
         
-        for i, diff_file in enumerate(diff_files):
-            logger.info(f"Analyzing file {i+1}/{len(diff_files)}: {diff_file.file_info.path}")
+        for i, diff_file in enumerate(unique_files):
+            logger.info(f"Analyzing file {i+1}/{len(unique_files)}: {diff_file.file_info.path}")
             
             try:
                 file_comments = await self._analyze_single_file(diff_file, pr_details)
@@ -245,21 +256,36 @@ class CodeReviewer:
         diff_files: List[DiffFile], 
         pr_details: PRDetails
     ) -> List[ReviewComment]:
-        """Analyze files concurrently for improved performance."""
-        logger.info(f"Analyzing {len(diff_files)} files concurrently "
-                   f"(max workers: {self.config.performance.max_concurrent_files})")
+        """Analyze files concurrently for improved performance.
+        Guarantees only one worker per unique file path.
+        """
+        
+        # Ensure we only schedule one task per unique file path
+        unique_files: List[DiffFile] = []
+        seen_paths: Set[str] = set()
+        for df in diff_files:
+            p = df.file_info.path
+            if p not in seen_paths:
+                seen_paths.add(p)
+                unique_files.append(df)
+            else:
+                logger.debug(f"Skipping duplicate file entry: {p}")
+        
+        logger.info(
+            f"Analyzing {len(unique_files)} unique files concurrently (up to "
+            f"{self.config.performance.max_concurrent_files} files in parallel; "
+            f"one worker per file)"
+        )
         
         all_comments = []
         
-        # Process files in chunks to manage resources
-        chunk_size = self.config.performance.chunk_size
-        max_workers = min(self.config.performance.max_concurrent_files, len(diff_files))
+        max_workers = min(self.config.performance.max_concurrent_files, len(unique_files))
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all file analysis tasks
+            # Submit one task per unique file
             future_to_file = {
                 executor.submit(self._analyze_single_file_sync, diff_file, pr_details): diff_file
-                for diff_file in diff_files
+                for diff_file in unique_files
             }
             
             # Process completed tasks as they finish
@@ -271,12 +297,17 @@ class CodeReviewer:
                     all_comments.extend(file_comments)
                     self.stats.files_processed += 1
                     
-                    logger.debug(f"Completed analysis of {diff_file.file_info.path} "
-                               f"({len(file_comments)} comments)")
+                    logger.debug(
+                        f"Completed analysis of {diff_file.file_info.path} (" 
+                        f"{len(file_comments)} comments)"
+                    )
 
                     # Post comments for this file immediately
                     if file_comments:
-                        logger.info(f"Posting review for file: {diff_file.file_info.path} with {len(file_comments)} comments")
+                        logger.info(
+                            f"Posting review for file: {diff_file.file_info.path} with "
+                            f"{len(file_comments)} comments"
+                        )
                         await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
                     else:
                         logger.debug(f"No comments for file: {diff_file.file_info.path}")
