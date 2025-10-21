@@ -280,12 +280,24 @@ class GitHubClient:
                     for rv in pr.get_reviews():
                         try:
                             author_login = getattr(rv.user, 'login', None)
-                            if my_login and author_login != my_login:
-                                # If we know our login, only trust our own reviews
-                                continue
                             commit_id = getattr(rv, 'commit_id', None)
                             submitted_at = getattr(rv, 'submitted_at', None)
                             body = getattr(rv, 'body', '') or ''
+
+                            # Decide if we should trust this review as authored by us
+                            trust = False
+                            if my_login and author_login == my_login:
+                                # We know our login and it matches
+                                trust = True
+                            elif not my_login:
+                                # Token might have changed; trust only if marker is present or author is a candidate login
+                                if marker_regex.search(body):
+                                    trust = True
+                                elif author_login and author_login in candidate_logins:
+                                    trust = True
+                            
+                            if not trust:
+                                continue
 
                             # Prefer direct commit_id if present
                             if commit_id and (latest_time is None or (submitted_at and submitted_at > latest_time)):
