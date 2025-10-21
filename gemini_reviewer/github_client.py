@@ -393,13 +393,18 @@ class GitHubClient:
                     logger.warning("Could not determine current head SHA; treating as no new changes")
                     return ""
             
-            # Check GITHUB_SHA environment variable - may contain merge commit SHA
+            # Note on GITHUB_SHA: In GitHub Actions this often points to a synthetic merge commit
+            # for refs/pull/*/merge which is not part of the PR branch history. Comparing a PR
+            # branch commit to this synthetic merge frequently returns 404 from the compare API.
+            # To avoid false "no changes" results and accidental full re-reviews, we intentionally
+            # ignore GITHUB_SHA here and rely solely on the PR's commit list/head.
             github_sha = os.getenv('GITHUB_SHA')
-            if github_sha:
-                logger.info(f"GITHUB_SHA from environment: {github_sha[:7]}...")
-                if github_sha != current_head_sha:
-                    logger.info(f"GITHUB_SHA differs from PR head - using GITHUB_SHA as it may be a merge commit")
-                    current_head_sha = github_sha
+            if github_sha and github_sha != current_head_sha:
+                logger.info(
+                    "GITHUB_SHA differs from PR head (likely a synthetic merge); ignoring for incremental diff"
+                )
+            elif github_sha:
+                logger.debug("GITHUB_SHA equals PR head; proceeding with PR head from API")
             else:
                 logger.debug("GITHUB_SHA not available in environment")
             
