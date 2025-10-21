@@ -231,6 +231,7 @@ class GitHubClient:
 
             # Log all commits on the PR for debugging and get the actual latest commit
             actual_latest_commit_sha = None
+            github_sha = os.getenv('GITHUB_SHA')
             try:
                 all_commits = list(pr.get_commits())
                 logger.info(f"PR has {len(all_commits)} commit(s):")
@@ -249,6 +250,8 @@ class GitHubClient:
                     actual_latest_commit_sha = getattr(all_commits[-1], 'sha', None)
                     logger.info(f"Actual latest commit from commit list: {actual_latest_commit_sha[:7] if actual_latest_commit_sha else 'unknown'}")
                     logger.info(f"PR head.sha from PR object: {pr_details.head_sha[:7] if pr_details.head_sha else 'unknown'}")
+                    if github_sha:
+                        logger.info(f"GITHUB_SHA from environment: {github_sha[:7] if len(github_sha) > 7 else github_sha}")
                     if actual_latest_commit_sha and pr_details.head_sha and actual_latest_commit_sha != pr_details.head_sha:
                         logger.warning(f"MISMATCH: PR head.sha differs from actual latest commit!")
             except Exception:
@@ -389,6 +392,9 @@ class GitHubClient:
         
         Re-fetches the PR to ensure we're comparing against the most current head commit,
         not potentially stale data from when pr_details was first created.
+        
+        When running in GitHub Actions, also checks GITHUB_SHA which may contain a merge
+        commit SHA if the PR was checked out with a merge ref.
         """
         try:
             if not base_sha:
@@ -418,6 +424,16 @@ class GitHubClient:
                 current_head_sha = pr_details.head_sha
                 if not current_head_sha:
                     return None
+            
+            # Check GITHUB_SHA environment variable - may contain merge commit SHA
+            github_sha = os.getenv('GITHUB_SHA')
+            if github_sha:
+                logger.info(f"GITHUB_SHA from environment: {github_sha[:7]}...")
+                if github_sha != current_head_sha:
+                    logger.info(f"GITHUB_SHA differs from PR head - using GITHUB_SHA as it may be a merge commit")
+                    current_head_sha = github_sha
+            else:
+                logger.debug("GITHUB_SHA not available in environment")
             
             repo_name = pr_details.repo_full_name
             
