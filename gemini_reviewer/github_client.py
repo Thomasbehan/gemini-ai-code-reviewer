@@ -229,6 +229,31 @@ class GitHubClient:
             repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
             pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
 
+            # Log all commits on the PR for debugging and get the actual latest commit
+            actual_latest_commit_sha = None
+            try:
+                all_commits = list(pr.get_commits())
+                logger.info(f"PR has {len(all_commits)} commit(s):")
+                for c in all_commits[-5:]:  # Show last 5 commits
+                    try:
+                        sha = getattr(c, 'sha', 'unknown')
+                        commit_obj = getattr(c, 'commit', None)
+                        author = getattr(commit_obj, 'author', None) if commit_obj else None
+                        commit_date = getattr(author, 'date', None) if author else None
+                        message = (getattr(commit_obj, 'message', '') if commit_obj else '').split('\n')[0][:60]
+                        logger.info(f"  - {sha[:7]} at {commit_date}: {message}")
+                    except Exception:
+                        pass
+                # Get the actual latest commit SHA from the commit list
+                if all_commits:
+                    actual_latest_commit_sha = getattr(all_commits[-1], 'sha', None)
+                    logger.info(f"Actual latest commit from commit list: {actual_latest_commit_sha[:7] if actual_latest_commit_sha else 'unknown'}")
+                    logger.info(f"PR head.sha from PR object: {pr_details.head_sha[:7] if pr_details.head_sha else 'unknown'}")
+                    if actual_latest_commit_sha and pr_details.head_sha and actual_latest_commit_sha != pr_details.head_sha:
+                        logger.warning(f"MISMATCH: PR head.sha differs from actual latest commit!")
+            except Exception:
+                pass
+
             # Determine current authenticated user login and candidate bot logins
             try:
                 me = self._client.get_user()
@@ -237,6 +262,7 @@ class GitHubClient:
                 my_login = None
             actor = os.getenv('GITHUB_ACTOR') or None
             candidate_logins: Set[str] = set(filter(None, [my_login, actor, 'github-actions[bot]', 'github-actions']))
+            logger.info(f"Bot identification: my_login={my_login}, candidates={candidate_logins}")
 
             latest_sha: Optional[str] = None
             latest_time = None
@@ -268,6 +294,7 @@ class GitHubClient:
                             latest_time = created_at
                             latest_sha = commit_id
                             source = 'comment'
+                            logger.debug(f"Found inline review comment by {author} at {created_at} on commit {commit_id[:7]}")
                     except Exception:
                         continue
             except Exception:
@@ -304,6 +331,7 @@ class GitHubClient:
                                 latest_time = submitted_at
                                 latest_sha = commit_id
                                 source = 'review'
+                                logger.debug(f"Found PR review by {author_login} at {submitted_at} on commit {commit_id[:7]}")
                                 continue
 
                             # Otherwise, if the body contains our marker, map by timestamp
@@ -313,6 +341,7 @@ class GitHubClient:
                                     latest_time = submitted_at
                                     latest_sha = base_sha
                                     source = 'review'
+                                    logger.debug(f"Found PR review by {author_login} at {submitted_at}, mapped to commit {base_sha[:7]}")
                         except Exception:
                             continue
                 except Exception:
@@ -341,11 +370,12 @@ class GitHubClient:
                             latest_sha = base_sha
                             latest_time = latest_marker_time
                             source = 'issue-comment'
+                            logger.debug(f"Found issue comment at {latest_marker_time}, mapped to commit {base_sha[:7]}")
                 except Exception:
                     pass
 
             if latest_sha:
-                logger.info(f"Detected last reviewed commit by this bot from {source}: {latest_sha}")
+                logger.info(f"Detected last reviewed commit by this bot from {source}: {latest_sha} (at {latest_time})")
             else:
                 logger.info("No prior bot review activity detected on this PR.")
             return latest_sha
@@ -356,18 +386,53 @@ class GitHubClient:
     def get_pr_diff_since(self, pr_details: PRDetails, base_sha: str) -> Optional[str]:
         """Fetch a diff of changes since a given base SHA up to the PR head.
         Uses GitHub compare API. Returns diff text or None on failure.
+        
+        Re-fetches the PR to ensure we're comparing against the most current head commit,
+        not potentially stale data from when pr_details was first created.
         """
         try:
-            if not base_sha or not pr_details.head_sha:
+            if not base_sha:
                 return None
+            
+            # Re-fetch the PR to get the most current head SHA
+            # This ensures we don't miss new commits due to stale data
+            try:
+                repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
+                pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
+                current_head_sha = pr.head.sha
+                
+                # Also get the actual latest commit from the commit list as a double-check
+                try:
+                    all_commits = list(pr.get_commits())
+                    if all_commits:
+                        actual_latest_sha = getattr(all_commits[-1], 'sha', None)
+                        if actual_latest_sha and actual_latest_sha != current_head_sha:
+                            logger.warning(f"PR head.sha ({current_head_sha[:7]}) differs from latest commit in list ({actual_latest_sha[:7]})")
+                            # Use the actual latest commit from the list as it's more reliable
+                            current_head_sha = actual_latest_sha
+                except Exception as e:
+                    logger.debug(f"Could not verify head SHA from commit list: {e}")
+                
+            except Exception as e:
+                logger.warning(f"Could not re-fetch PR for current head SHA, using pr_details.head_sha: {e}")
+                current_head_sha = pr_details.head_sha
+                if not current_head_sha:
+                    return None
+            
             repo_name = pr_details.repo_full_name
+            
+            # Log the comparison details
+            logger.info(f"Comparing: base_sha={base_sha[:7]}... vs current_head_sha={current_head_sha[:7]}...")
+            if pr_details.head_sha and pr_details.head_sha != current_head_sha:
+                logger.info(f"Note: pr_details.head_sha ({pr_details.head_sha[:7]}) differs from current head ({current_head_sha[:7]})")
+            
             # If base equals head, nothing to review
-            if base_sha == pr_details.head_sha:
-                logger.info("Base SHA equals head; no new changes to review.")
+            if base_sha == current_head_sha:
+                logger.info("Base SHA equals current head; no new changes to review.")
                 return ""
-            api_url = f"{self.config.api_base_url}/repos/{repo_name}/compare/{base_sha}...{pr_details.head_sha}.diff"
+            api_url = f"{self.config.api_base_url}/repos/{repo_name}/compare/{base_sha}...{current_head_sha}.diff"
             diff_headers = {'Accept': 'application/vnd.github.v3.diff'}
-            logger.info(f"Fetching incremental diff: {base_sha[:7]}... to {pr_details.head_sha[:7]}...")
+            logger.info(f"Fetching incremental diff: {base_sha[:7]}... to {current_head_sha[:7]}...")
             resp = self._session.get(api_url, headers=diff_headers, timeout=self.config.timeout)
             if resp.status_code == 200:
                 text = resp.text or ""
