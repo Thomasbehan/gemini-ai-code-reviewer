@@ -219,6 +219,8 @@ class GitHubClient:
         Strategy (more reliable):
         - Prefer the most recent inline review comment authored by this bot (or containing our hidden AI signature).
         - Fall back to PR reviews authored by this bot (summary reviews) if no suitable inline comment is found.
+        - If still not found, look for the latest PR issue comment containing the marker "Gemini AI Code Review"
+          (e.g., "🤖 **Gemini AI Code Review**") and map its timestamp to the latest commit at or before that time.
         - If the authenticated user cannot be determined, also consider comments authored by candidate bot logins
           (GITHUB_ACTOR and github-actions[bot]) in addition to signed comments.
         Returns SHA or None if not found.
@@ -238,7 +240,7 @@ class GitHubClient:
 
             latest_sha: Optional[str] = None
             latest_time = None
-            source = None  # 'comment' or 'review'
+            source = None  # 'comment' | 'review' | 'issue-comment'
 
             # 1) Prefer inline review comments (most accurate signal)
             try:
@@ -272,20 +274,61 @@ class GitHubClient:
                 pass
 
             # 2) Fallback: PR reviews authored by us
-            if latest_sha is None and my_login:
+            if latest_sha is None:
                 try:
+                    marker_regex = re.compile(r"Gemini AI Code Review", re.IGNORECASE)
                     for rv in pr.get_reviews():
                         try:
-                            if getattr(rv.user, 'login', None) != my_login:
+                            author_login = getattr(rv.user, 'login', None)
+                            if my_login and author_login != my_login:
+                                # If we know our login, only trust our own reviews
                                 continue
                             commit_id = getattr(rv, 'commit_id', None)
                             submitted_at = getattr(rv, 'submitted_at', None)
+                            body = getattr(rv, 'body', '') or ''
+
+                            # Prefer direct commit_id if present
                             if commit_id and (latest_time is None or (submitted_at and submitted_at > latest_time)):
                                 latest_time = submitted_at
                                 latest_sha = commit_id
                                 source = 'review'
+                                continue
+
+                            # Otherwise, if the body contains our marker, map by timestamp
+                            if marker_regex.search(body) and submitted_at:
+                                base_sha = self._find_latest_commit_sha_before(pr, submitted_at)
+                                if base_sha and (latest_time is None or submitted_at > latest_time):
+                                    latest_time = submitted_at
+                                    latest_sha = base_sha
+                                    source = 'review'
                         except Exception:
                             continue
+                except Exception:
+                    pass
+
+            # 3) Fallback: Issue comments containing our visible marker
+            if latest_sha is None:
+                try:
+                    marker_regex = re.compile(r"Gemini AI Code Review", re.IGNORECASE)
+                    latest_marker_time = None
+                    for ic in pr.as_issue().get_comments():
+                        try:
+                            body = getattr(ic, 'body', '') or ''
+                            if not marker_regex.search(body):
+                                continue
+                            created_at = getattr(ic, 'created_at', None)
+                            if latest_marker_time is None or (created_at and created_at > latest_marker_time):
+                                latest_marker_time = created_at
+                        except Exception:
+                            continue
+
+                    if latest_marker_time:
+                        # Map comment timestamp to the latest commit at or before that time
+                        base_sha = self._find_latest_commit_sha_before(pr, latest_marker_time)
+                        if base_sha:
+                            latest_sha = base_sha
+                            latest_time = latest_marker_time
+                            source = 'issue-comment'
                 except Exception:
                     pass
 
@@ -326,6 +369,35 @@ class GitHubClient:
                 return None
         except Exception as e:
             logger.debug(f"Failed to get incremental diff: {e}")
+            return None
+
+    def _find_latest_commit_sha_before(self, pr, timestamp) -> Optional[str]:
+        """Find the latest commit SHA on the PR with commit time <= timestamp.
+        We consider committer date first, then author date as fallback.
+        """
+        try:
+            latest = None
+            latest_time = None
+            for c in pr.get_commits():
+                try:
+                    sha = getattr(c, 'sha', None)
+                    commit = getattr(c, 'commit', None)
+                    committer = getattr(commit, 'committer', None) if commit else None
+                    author = getattr(commit, 'author', None) if commit else None
+                    commit_time = None
+                    if committer and getattr(committer, 'date', None):
+                        commit_time = committer.date
+                    elif author and getattr(author, 'date', None):
+                        commit_time = author.date
+                    if not sha or not commit_time:
+                        continue
+                    if commit_time <= timestamp and (latest_time is None or commit_time > latest_time):
+                        latest = sha
+                        latest_time = commit_time
+                except Exception:
+                    continue
+            return latest
+        except Exception:
             return None
     
     @retry(
