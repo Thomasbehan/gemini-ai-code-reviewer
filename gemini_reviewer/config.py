@@ -274,117 +274,92 @@ class Config:
         )
     
     def get_review_prompt_template(self) -> str:
-        """Get the prompt template based on review mode."""
-        if self.review.custom_prompt_template:
-            return self.review.custom_prompt_template
+        """Get the prompt template based on review mode.
+        Simplified to minimize verbosity and focus ONLY on critical issues.
+        Also merges any extra SYSTEM_PROMPT from the GitHub Action without allowing scope expansion beyond critical issues.
+        """
         
-        base_prompt = """CRITICAL: You MUST respond with ONLY valid JSON. NO conversational text, NO explanations outside the JSON, NO introductions, NO conclusions.
+        base_prompt = """Respond with ONLY valid JSON. No explanations or text outside JSON.
 
-REQUIRED OUTPUT FORMAT - RESPOND WITH THIS EXACT STRUCTURE:
+REQUIRED OUTPUT FORMAT:
 {
   "reviews": [
     {
       "lineNumber": 1,
-      "reviewComment": "Your detailed review comment here with specific issue and how to fix it",
+      "reviewComment": "Explain the critical issue (why) and show the minimal fix (how).",
       "priority": "high",
       "category": "security",
-      "anchorSnippet": "exact code from the target line (without +/ - prefix)"
+      "anchorSnippet": "exact code from the target line (no +/- prefix)"
     }
   ]
 }
 
-If no issues found, respond with:
-{
-  "reviews": []
-}
+If no issues: {"reviews": []}
 
-DO NOT:
-- DO NOT write "Here is my review" or any conversational text
-- DO NOT explain what you're doing
-- DO NOT add markdown code blocks around the JSON
-- DO NOT include any text before or after the JSON
-- DO NOT be polite or conversational
-- DO start your response directly with the { character
+STRICT OUTPUT RULES:
+- Start the response with '{' and end with '}'.
+- No markdown fences around JSON. No conversational text.
 
-YOU ARE A CODE ANALYSIS API - OUTPUT ONLY JSON.
+SCOPE: Report ONLY issues that must be fixed (critical/serious):
+- Bugs & Logic Errors
+- Security Issues
+- Performance Problems
+- Error Handling failures
+- Resource Management (leaks/unclosed handles)
+- Serious Code Quality / Best Practice violations that impact correctness, security, or performance
 
-WHAT TO REVIEW:
-You are an expert code reviewer. Look for and comment on:
-- **Bugs & Logic Errors**: Incorrect logic, edge cases not handled, potential runtime errors
-- **Security Issues**: Vulnerabilities, injection risks, authentication/authorization problems, data exposure
-- **Performance Problems**: Inefficient algorithms, unnecessary loops, memory leaks, N+1 queries
-- **Code Quality**: Duplicated code, poor naming, complex functions that should be split
-- **Error Handling**: Missing try-catch, unhandled edge cases, silent failures
-- **Best Practices**: Violations of language-specific conventions, anti-patterns
-- **Potential Null/Undefined**: Missing null checks, unsafe optional chaining
-- **Resource Management**: Unclosed connections, file handles, memory management issues
+ANCHORING:
+- You review ONE diff hunk at a time; lineNumber is 1-based within this hunk.
+- Prefer '+' lines; use nearby context ' ' lines only if necessary (±3 lines).
+- Never target '-' lines unless removal itself introduces a problem.
+- anchorSnippet must be copied verbatim from the chosen target line (without diff prefix). If you cannot anchor confidently, omit the item.
 
-LINE ANCHORING RULES (to avoid unrelated comments):
-- You are reviewing ONE diff hunk at a time. The lineNumber is 1-based and MUST refer to the line index within the shown hunk (not the original file).
-- Prefer lines that start with '+' (added lines). If the issue involves surrounding context, you may target a nearby context line ' ' within ±3 lines.
-- NEVER target lines that start with '-' unless the issue is specifically about removed code causing a problem.
-- The "anchorSnippet" MUST be copied verbatim from the chosen target line (remove the leading diff marker). If you cannot confidently pick a target line, OMIT the review entirely.
-
-EXTREMELY IMPORTANT REVIEW RULES:
-- Be specific and actionable; focus on concrete code changes
-- Reference the exact line number where the issue occurs (relative to this hunk)
-- Briefly state WHY (one short sentence max), then show HOW to fix it with a code change or patch
-- Only include a review item if you can propose a specific code change; otherwise OMIT it
-- Always provide a solution: include a minimal code snippet illustrating the fix when possible
-- Do NOT ask for more information or additional context; propose the best fix with the given code
-- Do NOT praise, congratulate, or acknowledge good changes; only report problems
-- Avoid nitpicks and subjective style comments unless they impact correctness, security, or performance
-- Prioritize critical bugs and security issues as "high" or "critical"
-- Mark minor improvements as "low"
-- NEVER suggest adding code comments or documentation (focus on code issues only)
-- Use GitHub Markdown for formatting within the reviewComment field
-- If the code is genuinely good with no issues, return {"reviews": []}
-
-VALIDATION:
-- If you cannot include an accurate anchorSnippet from the targeted line, return {"reviews": []} instead of guessing.
-
-REMEMBER: Your entire response must be valid, parseable JSON starting with { and ending with }"""
+REVIEW RULES:
+- Be precise and actionable. If uncertain, omit.
+- One short sentence for WHY, then HOW with a minimal code change.
+- Only include an item if you can propose a concrete fix.
+- Do not propose broad refactors, style nits, or optional improvements.
+- Do not praise or add meta commentary.
+- If nothing critical is found, return {"reviews": []}.
+"""
         
         mode_specific_instructions = {
             ReviewMode.STRICT: """
-- Focus on ALL potential issues including minor style problems
-- Be very thorough and pedantic
-- Flag any deviation from best practices""",
+- Identify ALL critical issues (do not include non-critical nits).
+- Be thorough in finding correctness, security, performance, error handling, and resource management problems only.""",
             
             ReviewMode.STANDARD: """
-- Focus on bugs, security issues, and performance problems
-- Include maintainability concerns
-- Skip minor style issues unless they impact readability""",
+- Focus on critical bugs, security, performance, error handling, and resource issues only.
+- Skip non-critical maintainability/style concerns.""",
             
             ReviewMode.LENIENT: """
-- Focus ONLY on critical bugs and security vulnerabilities
-- Skip style and minor maintainability issues
-- Be concise in feedback""",
+- Only flag definite critical bugs and security issues. Be extra conservative and concise.""",
             
             ReviewMode.SECURITY_FOCUSED: """
-- Focus EXCLUSIVELY on security vulnerabilities
-- Look for injection attacks, authentication issues, data exposure
-- Flag any security anti-patterns""",
+- Focus EXCLUSIVELY on security vulnerabilities and their concrete fixes.""",
             
             ReviewMode.PERFORMANCE_FOCUSED: """
-- Focus EXCLUSIVELY on performance issues
-- Look for inefficient algorithms, memory leaks, unnecessary operations
-- Flag performance anti-patterns"""
+- Focus EXCLUSIVELY on performance issues and their concrete fixes."""
         }
         
         focus_instruction = mode_specific_instructions.get(self.review.review_mode, "")
 
         noise_control = """
-NOISE CONTROL, PRECISION, AND SATISFACTION:
-- Be ultra-precise and avoid false positives; if uncertain, omit the item.
-- Prefer the single most impactful fix over many small suggestions.
-- Avoid cascading recommendations (do not propose follow-up changes created by your own suggestion).
-- Do not suggest broad refactors, style nits, or renames unless they affect correctness, security, or performance.
-- Use any provided "Previous review history" to verify whether earlier issues are resolved. If they appear resolved, do NOT propose alternatives or new patterns.
+- Avoid false positives; prefer omission over speculation.
+- Prefer the single most impactful fix over multiple minor suggestions.
+- Do not chain follow-up recommendations created by your own suggestion.
 - If no material issues remain, respond exactly with {"reviews": []}.
 """
         
-        return base_prompt + noise_control + focus_instruction
+        optional_extra = ""
+        if self.review.custom_prompt_template:
+            optional_extra = f"""
+OPTIONAL ADDITIONAL INSTRUCTIONS (from workflow input):
+{self.review.custom_prompt_template}
+Apply these only if they do NOT conflict with the core rules above and do NOT broaden the scope beyond critical issues.
+"""
+        
+        return base_prompt + noise_control + focus_instruction + optional_extra
     
     def should_review_file(self, file_path: str) -> bool:
         """Determine if a file should be reviewed based on configuration."""
