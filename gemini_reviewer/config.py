@@ -212,11 +212,16 @@ class Config:
             logging=logging_config
         )
     
-    def get_review_prompt_template(self) -> str:
-        """Get the prompt template based on review mode and custom instructions."""
+    def get_review_prompt_template(self, previous_comments: str = "") -> str:
+        """Get the prompt template based on review mode and custom instructions.
+        
+        Args:
+            previous_comments: Previous review comments for follow-up reviews
+        """
         return get_prompt_template(
             self.review.review_mode,
-            self.review.custom_prompt_template or ""
+            self.review.custom_prompt_template or "",
+            previous_comments
         )
     
     def should_review_file(self, file_path: str) -> bool:

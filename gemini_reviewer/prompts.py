@@ -15,6 +15,7 @@ class ReviewMode(Enum):
     LENIENT = "lenient"
     SECURITY_FOCUSED = "security_focused"
     PERFORMANCE_FOCUSED = "performance_focused"
+    FOLLOWUP = "followup"
 
 
 # Base prompt template for all review modes
@@ -87,21 +88,78 @@ MODE_INSTRUCTIONS = {
 - Focus EXCLUSIVELY on security vulnerabilities and their concrete fixes.""",
     
     ReviewMode.PERFORMANCE_FOCUSED: """
-- Focus EXCLUSIVELY on performance issues and their concrete fixes."""
+- Focus EXCLUSIVELY on performance issues and their concrete fixes.""",
+    
+    ReviewMode.FOLLOWUP: """
+- THIS IS A FOLLOW-UP REVIEW. DO NOT raise any new issues.
+- Your ONLY task is to check if the previous comments (listed below) have been resolved.
+- For each previous comment, check if the issue was fixed in the current code changes.
+- If a comment is resolved, note it. If not resolved, explain what still needs to be done.
+- NEVER introduce new issues or concerns. ONLY focus on the previous comments."""
 }
 
+# Follow-up review prompt template
+FOLLOWUP_PROMPT_TEMPLATE = """Respond with ONLY valid JSON. No explanations or text outside JSON.
 
-def get_review_prompt_template(review_mode: ReviewMode, custom_instructions: str = "") -> str:
+THIS IS A FOLLOW-UP REVIEW. Your task is ONLY to verify if previous review comments have been addressed.
+
+REQUIRED OUTPUT FORMAT:
+{{
+  "reviews": [
+    {{
+      "lineNumber": 1,
+      "reviewComment": "Previous issue: [description]. Status: [Resolved/Not Resolved]. [If not resolved: what still needs to be done]",
+      "priority": "medium",
+      "category": "followup",
+      "anchorSnippet": "exact code from the target line (no +/- prefix)"
+    }}
+  ]
+}}
+
+If all previous comments are resolved: {{"reviews": []}}
+
+CRITICAL RULES FOR FOLLOW-UP REVIEW:
+1. DO NOT raise any new issues, bugs, or concerns.
+2. ONLY check if the previous comments listed below were addressed.
+3. If you cannot find evidence that a previous comment was addressed, mark it as unresolved.
+4. If the previous comment was addressed, do not report it (return empty reviews).
+5. Do NOT suggest new improvements, optimizations, or refactorings.
+6. Do NOT comment on code that wasn't mentioned in previous comments.
+7. ONLY focus on verifying the resolution of the specific issues mentioned in previous comments.
+
+PREVIOUS COMMENTS TO VERIFY:
+{previous_comments}
+
+ANCHORING:
+- You review ONE diff hunk at a time; lineNumber is 1-based within this hunk.
+- Prefer '+' lines; use nearby context ' ' lines only if necessary (±3 lines).
+- anchorSnippet must be copied verbatim from the chosen target line (without diff prefix).
+
+STRICT OUTPUT RULES:
+- Start the response with '{{' and end with '}}'.
+- No markdown fences around JSON. No conversational text.
+- If all previous comments are resolved or none of the previous comments relate to this code, return {{"reviews": []}}.
+"""
+
+
+def get_review_prompt_template(review_mode: ReviewMode, custom_instructions: str = "", previous_comments: str = "") -> str:
     """Get the complete prompt template for code review.
     
     Args:
         review_mode: The review mode to use
         custom_instructions: Optional custom instructions to append
+        previous_comments: Previous review comments for follow-up reviews
         
     Returns:
         The complete prompt template string
     """
-    # Get mode-specific instructions
+    # For follow-up reviews, use the special follow-up template
+    if review_mode == ReviewMode.FOLLOWUP:
+        if not previous_comments:
+            previous_comments = "No previous comments found."
+        return FOLLOWUP_PROMPT_TEMPLATE.format(previous_comments=previous_comments)
+    
+    # Get mode-specific instructions for regular reviews
     mode_instruction = MODE_INSTRUCTIONS.get(review_mode, "")
     
     # Build the prompt

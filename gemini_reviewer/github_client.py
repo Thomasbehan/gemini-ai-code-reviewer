@@ -770,6 +770,59 @@ class GitHubClient:
             logger.debug(f"Could not fetch existing review comments: {e}")
             return set()
 
+    def get_existing_bot_comments(self, pr_details: PRDetails) -> List[Dict[str, Any]]:
+        """Fetch all existing bot review comments with their full content for follow-up reviews.
+        
+        Returns a list of dicts with keys: path, line, body, created_at
+        Only includes comments that appear to be from the bot (have AI-SIG marker or match bot username).
+        """
+        try:
+            repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
+            pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
+            bot_comments = []
+            
+            try:
+                existing_comments = pr.get_review_comments()
+            except Exception:
+                existing_comments = []
+            
+            # Get bot username/id if available
+            try:
+                current_user = self.client.get_user().login
+            except Exception:
+                current_user = None
+            
+            for c in existing_comments:
+                try:
+                    path = getattr(c, 'path', None)
+                    body = getattr(c, 'body', '') or ''
+                    
+                    # Check if this is a bot comment (has AI-SIG marker or is from bot user)
+                    has_ai_sig = bool(re.search(r'<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->', body, flags=re.IGNORECASE))
+                    user = getattr(c, 'user', None)
+                    username = getattr(user, 'login', '') if user else ''
+                    is_bot_user = current_user and username == current_user
+                    
+                    if has_ai_sig or is_bot_user:
+                        # Clean the body of signature markers for display
+                        cleaned_body = self._strip_signature_marker(body)
+                        
+                        bot_comments.append({
+                            'path': path,
+                            'line': getattr(c, 'original_line', getattr(c, 'line', None)),
+                            'body': cleaned_body,
+                            'created_at': str(getattr(c, 'created_at', ''))
+                        })
+                except Exception:
+                    continue
+            
+            logger.info(f"Found {len(bot_comments)} existing bot review comments for PR #{pr_details.pull_number}")
+            return bot_comments
+            
+        except Exception as e:
+            logger.warning(f"Could not fetch existing bot review comments: {e}")
+            return []
+
     def filter_out_existing_comments(self, pr_details: PRDetails, comments: List[ReviewComment]) -> List[ReviewComment]:
         """Filter out comments that match signatures of existing PR comments; also dedupe within batch.
         Enhancements:

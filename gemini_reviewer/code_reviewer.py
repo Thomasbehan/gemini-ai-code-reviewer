@@ -48,6 +48,10 @@ class CodeReviewer:
         # Cache of existing AI comment signatures for this PR/session to avoid re-generating the same comments
         self._existing_comment_signatures: Set[str] = set()
         
+        # Track if this is a follow-up review and store previous comments
+        self._is_followup_review: bool = False
+        self._previous_comments: str = ""
+        
         # Statistics tracking
         self.stats = ProcessingStats(start_time=time.time())
         
@@ -69,6 +73,31 @@ class CodeReviewer:
             except Exception as _e:
                 logger.debug(f"Could not load existing comment signatures prior to analysis: {_e}")
                 self._existing_comment_signatures = set()
+            
+            # Fetch existing bot comments to determine if this is a follow-up review
+            try:
+                existing_bot_comments = self.github_client.get_existing_bot_comments(pr_details)
+                if existing_bot_comments:
+                    self._is_followup_review = True
+                    # Format previous comments for the AI
+                    formatted_comments = []
+                    for i, comment in enumerate(existing_bot_comments, 1):
+                        formatted_comments.append(
+                            f"{i}. File: {comment['path']}\n"
+                            f"   Line: {comment.get('line', 'N/A')}\n"
+                            f"   Comment: {comment['body']}\n"
+                            f"   Posted: {comment.get('created_at', 'N/A')}"
+                        )
+                    self._previous_comments = "\n\n".join(formatted_comments)
+                    logger.info(f"🔄 FOLLOW-UP REVIEW MODE: Found {len(existing_bot_comments)} previous bot comments. AI will ONLY check if they were resolved.")
+                else:
+                    self._is_followup_review = False
+                    self._previous_comments = ""
+                    logger.info("✨ FIRST REVIEW: No previous bot comments found. AI will perform initial comprehensive review.")
+            except Exception as _e:
+                logger.debug(f"Could not determine review type: {_e}")
+                self._is_followup_review = False
+                self._previous_comments = ""
             
             # Create initial result object
             result = ReviewResult(pr_details=pr_details)
@@ -348,8 +377,19 @@ class CodeReviewer:
             project_context=project_context
         )
         
-        # Get prompt template based on configuration
-        prompt_template = self.config.get_review_prompt_template()
+        # Get prompt template based on configuration and review type
+        # If this is a follow-up review, temporarily override to FOLLOWUP mode
+        if self._is_followup_review:
+            from .prompts import ReviewMode
+            # Save original mode
+            original_mode = self.config.review.review_mode
+            # Temporarily set to FOLLOWUP mode
+            self.config.review.review_mode = ReviewMode.FOLLOWUP
+            prompt_template = self.config.get_review_prompt_template(self._previous_comments)
+            # Restore original mode
+            self.config.review.review_mode = original_mode
+        else:
+            prompt_template = self.config.get_review_prompt_template()
         
         # Analyze each hunk in the file
         for hunk_index, hunk in enumerate(diff_file.hunks):
