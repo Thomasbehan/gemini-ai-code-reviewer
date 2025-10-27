@@ -5,22 +5,20 @@ This module handles all configuration aspects including environment variables,
 validation, and default settings.
 """
 
-import os
 import logging
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional
 from enum import Enum
 
 from .models import ReviewFocus, ReviewPriority
-
-
-class ReviewMode(Enum):
-    """Different review modes."""
-    STRICT = "strict"
-    STANDARD = "standard" 
-    LENIENT = "lenient"
-    SECURITY_FOCUSED = "security_focused"
-    PERFORMANCE_FOCUSED = "performance_focused"
+from .validators import (
+    validate_required_string, validate_positive_int, validate_range,
+    validate_github_token_format, validate_gemini_api_key_format,
+    ensure_positive_or_default
+)
+from .env_reader import get_env_str, get_env_int, get_env_float, get_env_bool, get_env_list, get_env_enum
+from .utils import matches_pattern, is_test_file, is_doc_file
+from .prompts import ReviewMode, get_review_prompt_template as get_prompt_template
 
 
 class LogLevel(Enum):
@@ -43,22 +41,9 @@ class GitHubConfig:
     
     def __post_init__(self):
         """Validate GitHub configuration."""
-        if not self.token:
-            raise ValueError("GitHub token is required")
-        
-        if not self._validate_token_format(self.token):
+        validate_required_string(self.token, "GitHub token")
+        if not validate_github_token_format(self.token):
             raise ValueError("Invalid GitHub token format")
-    
-    @staticmethod
-    def _validate_token_format(token: str) -> bool:
-        """Validate GitHub token format."""
-        if not token or not isinstance(token, str):
-            return False
-        # GitHub tokens are typically 40 characters (classic) or start with specific prefixes
-        return len(token) >= 4 and (
-            len(token) == 40 or 
-            token.startswith(('ghp_', 'ghs_', 'gho_', 'ghu_'))
-        )
 
 
 @dataclass  
@@ -77,25 +62,11 @@ class GeminiConfig:
     
     def __post_init__(self):
         """Validate Gemini configuration."""
-        if not self.api_key:
-            raise ValueError("Gemini API key is required")
-            
-        if not self._validate_api_key_format(self.api_key):
+        validate_required_string(self.api_key, "Gemini API key")
+        if not validate_gemini_api_key_format(self.api_key):
             raise ValueError("Invalid Gemini API key format")
-            
-        if not 0.0 <= self.temperature <= 2.0:
-            raise ValueError("Temperature must be between 0.0 and 2.0")
-            
-        if not 0.0 <= self.top_p <= 1.0:
-            raise ValueError("Top_p must be between 0.0 and 1.0")
-    
-    @staticmethod
-    def _validate_api_key_format(api_key: str) -> bool:
-        """Validate Gemini API key format."""
-        if not api_key or not isinstance(api_key, str):
-            return False
-        # Gemini API keys are typically alphanumeric with some special characters
-        return len(api_key) > 10
+        validate_range(self.temperature, 0.0, 2.0, "Temperature")
+        validate_range(self.top_p, 0.0, 1.0, "Top_p")
 
 
 @dataclass
@@ -119,12 +90,9 @@ class ReviewConfig:
     
     def __post_init__(self):
         """Validate review configuration."""
-        if self.max_files_per_review <= 0:
-            raise ValueError("max_files_per_review must be positive")
-            
-        if self.max_lines_per_hunk <= 0:
-            raise ValueError("max_lines_per_hunk must be positive")
-            
+        validate_positive_int(self.max_files_per_review, "max_files_per_review")
+        validate_positive_int(self.max_lines_per_hunk, "max_lines_per_hunk")
+        
         # Set default exclude patterns if none specified
         if not self.exclude_patterns:
             self.exclude_patterns = [
@@ -145,11 +113,8 @@ class PerformanceConfig:
     
     def __post_init__(self):
         """Validate performance configuration."""
-        if self.max_concurrent_files <= 0:
-            self.max_concurrent_files = 1
-            
-        if self.max_concurrent_api_calls <= 0:
-            self.max_concurrent_api_calls = 1
+        self.max_concurrent_files = ensure_positive_or_default(self.max_concurrent_files, 1)
+        self.max_concurrent_api_calls = ensure_positive_or_default(self.max_concurrent_api_calls, 1)
 
 
 @dataclass
@@ -176,8 +141,8 @@ class Config:
     def from_environment(cls) -> 'Config':
         """Create configuration from environment variables."""
         # Required environment variables
-        github_token = os.environ.get("GITHUB_TOKEN", "")
-        gemini_api_key = os.environ.get("GEMINI_API_KEY", "")
+        github_token = get_env_str("GITHUB_TOKEN")
+        gemini_api_key = get_env_str("GEMINI_API_KEY")
         
         if not github_token:
             raise ValueError("GITHUB_TOKEN environment variable is required")
@@ -187,82 +152,56 @@ class Config:
         # GitHub configuration
         github_config = GitHubConfig(
             token=github_token,
-            timeout=int(os.environ.get("GITHUB_TIMEOUT", "30")),
-            max_retries=int(os.environ.get("GITHUB_MAX_RETRIES", "3"))
+            timeout=get_env_int("GITHUB_TIMEOUT", 30),
+            max_retries=get_env_int("GITHUB_MAX_RETRIES", 3)
         )
         
         # Gemini configuration  
         gemini_config = GeminiConfig(
             api_key=gemini_api_key,
-            model_name=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-            temperature=float(os.environ.get("GEMINI_TEMPERATURE", "0.0")),  # Lower for precise code reviews
-            top_p=float(os.environ.get("GEMINI_TOP_P", "0.9")),  # Lower for more focused output
-            max_output_tokens=int(os.environ.get("GEMINI_MAX_TOKENS", "8192"))
+            model_name=get_env_str("GEMINI_MODEL", "gemini-2.5-flash"),
+            temperature=get_env_float("GEMINI_TEMPERATURE", 0.0),
+            top_p=get_env_float("GEMINI_TOP_P", 0.9),
+            max_output_tokens=get_env_int("GEMINI_MAX_TOKENS", 8192)
         )
         
         # Review configuration
-        exclude_patterns_raw = os.environ.get("EXCLUDE", "") or os.environ.get("INPUT_EXCLUDE", "")
-        include_patterns_raw = os.environ.get("INCLUDE", "") or os.environ.get("INPUT_INCLUDE", "")
-        exclude_patterns = [p.strip() for p in exclude_patterns_raw.split(",") if p.strip()] if exclude_patterns_raw else []
-        include_patterns = [p.strip() for p in include_patterns_raw.split(",") if p.strip()] if include_patterns_raw else []
-        
-        review_mode_str = os.environ.get("REVIEW_MODE", "standard").lower()
-        review_mode = ReviewMode.STANDARD
-        try:
-            review_mode = ReviewMode(review_mode_str)
-        except ValueError:
-            logging.warning(f"Invalid review mode '{review_mode_str}', using 'standard'")
-        
-        # Priority threshold
-        priority_str = (
-            os.environ.get("REVIEW_PRIORITY_THRESHOLD")
-            or os.environ.get("INPUT_REVIEW_PRIORITY_THRESHOLD")
-            or os.environ.get("PRIORITY_THRESHOLD")
+        exclude_patterns = get_env_list("EXCLUDE", ",", "INPUT_EXCLUDE")
+        include_patterns = get_env_list("INCLUDE", ",", "INPUT_INCLUDE")
+        review_mode = get_env_enum("REVIEW_MODE", ReviewMode, ReviewMode.STANDARD)
+        priority_threshold = get_env_enum(
+            "REVIEW_PRIORITY_THRESHOLD", ReviewPriority, ReviewPriority.LOW,
+            "INPUT_REVIEW_PRIORITY_THRESHOLD", "PRIORITY_THRESHOLD"
         )
-        priority_threshold = ReviewPriority.LOW
-        if priority_str:
-            try:
-                priority_threshold = ReviewPriority(priority_str.strip().lower())
-            except ValueError:
-                logging.warning(f"Invalid priority threshold '{priority_str}', using 'low'")
-        
-        # Get custom system prompt if provided
-        system_prompt = os.environ.get("SYSTEM_PROMPT", "") or os.environ.get("INPUT_SYSTEM_PROMPT", "")
-        custom_prompt_template = system_prompt.strip() if system_prompt else None
+        custom_prompt = get_env_str("SYSTEM_PROMPT", "", "INPUT_SYSTEM_PROMPT")
         
         review_config = ReviewConfig(
             review_mode=review_mode,
             exclude_patterns=exclude_patterns,
             include_patterns=include_patterns,
-            max_files_per_review=int(os.environ.get("MAX_FILES_PER_REVIEW", "50")),
-            max_lines_per_hunk=int(os.environ.get("MAX_LINES_PER_HUNK", "500")),
-            review_test_files=os.environ.get("REVIEW_TEST_FILES", "false").lower() == "true",
-            review_docs=os.environ.get("REVIEW_DOCS", "false").lower() == "true",
-            custom_prompt_template=custom_prompt_template,
+            max_files_per_review=get_env_int("MAX_FILES_PER_REVIEW", 50),
+            max_lines_per_hunk=get_env_int("MAX_LINES_PER_HUNK", 500),
+            review_test_files=get_env_bool("REVIEW_TEST_FILES", False),
+            review_docs=get_env_bool("REVIEW_DOCS", False),
+            custom_prompt_template=custom_prompt if custom_prompt else None,
             priority_threshold=priority_threshold,
-            max_comments_total=int(os.environ.get("MAX_COMMENTS_TOTAL", os.environ.get("INPUT_MAX_COMMENTS_TOTAL", "0"))),
-            max_comments_per_file=int(os.environ.get("MAX_COMMENTS_PER_FILE", os.environ.get("INPUT_MAX_COMMENTS_PER_FILE", "0")))
+            max_comments_total=get_env_int("MAX_COMMENTS_TOTAL", 0, "INPUT_MAX_COMMENTS_TOTAL"),
+            max_comments_per_file=get_env_int("MAX_COMMENTS_PER_FILE", 0, "INPUT_MAX_COMMENTS_PER_FILE")
         )
         
         # Performance configuration
         performance_config = PerformanceConfig(
-            enable_concurrent_processing=os.environ.get("ENABLE_CONCURRENT", "true").lower() == "true",
-            max_concurrent_files=int(os.environ.get("MAX_CONCURRENT_FILES", "3")),
-            max_concurrent_api_calls=int(os.environ.get("MAX_CONCURRENT_API_CALLS", "5")),
-            enable_caching=os.environ.get("ENABLE_CACHING", "true").lower() == "true"
+            enable_concurrent_processing=get_env_bool("ENABLE_CONCURRENT", True),
+            max_concurrent_files=get_env_int("MAX_CONCURRENT_FILES", 3),
+            max_concurrent_api_calls=get_env_int("MAX_CONCURRENT_API_CALLS", 5),
+            enable_caching=get_env_bool("ENABLE_CACHING", True)
         )
         
         # Logging configuration
-        log_level_str = os.environ.get("LOG_LEVEL", "INFO").upper()
-        log_level = LogLevel.INFO
-        try:
-            log_level = LogLevel(log_level_str)
-        except ValueError:
-            logging.warning(f"Invalid log level '{log_level_str}', using 'INFO'")
-        
+        log_level = get_env_enum("LOG_LEVEL", LogLevel, LogLevel.INFO)
         logging_config = LoggingConfig(
             level=log_level,
-            enable_file_logging=os.environ.get("ENABLE_FILE_LOGGING", "false").lower() == "true"
+            enable_file_logging=get_env_bool("ENABLE_FILE_LOGGING", False)
         )
         
         return cls(
@@ -274,134 +213,34 @@ class Config:
         )
     
     def get_review_prompt_template(self) -> str:
-        """Get the prompt template based on review mode.
-        Simplified to minimize verbosity and focus ONLY on critical issues.
-        Also merges any extra SYSTEM_PROMPT from the GitHub Action without allowing scope expansion beyond critical issues.
-        """
-        
-        base_prompt = """Respond with ONLY valid JSON. No explanations or text outside JSON.
-
-REQUIRED OUTPUT FORMAT:
-{
-  "reviews": [
-    {
-      "lineNumber": 1,
-      "reviewComment": "Explain the critical issue (why) and show the minimal fix (how).",
-      "priority": "high",
-      "category": "security",
-      "anchorSnippet": "exact code from the target line (no +/- prefix)"
-    }
-  ]
-}
-
-If no issues: {"reviews": []}
-
-STRICT OUTPUT RULES:
-- Start the response with '{' and end with '}'.
-- No markdown fences around JSON. No conversational text.
-
-SCOPE: Report ONLY issues that must be fixed (critical/serious):
-- Bugs & Logic Errors
-- Security Issues
-- Performance Problems
-- Error Handling failures
-- Resource Management (leaks/unclosed handles)
-- Serious Code Quality / Best Practice violations that impact correctness, security, or performance
-
-ANCHORING:
-- You review ONE diff hunk at a time; lineNumber is 1-based within this hunk.
-- Prefer '+' lines; use nearby context ' ' lines only if necessary (±3 lines).
-- Never target '-' lines unless removal itself introduces a problem.
-- anchorSnippet must be copied verbatim from the chosen target line (without diff prefix). If you cannot anchor confidently, omit the item.
-
-REVIEW RULES:
-- Be precise and actionable. If uncertain, omit.
-- One short sentence for WHY, then HOW with a minimal code change.
-- Only include an item if you can propose a concrete fix.
-- Do not propose broad refactors, style nits, or optional improvements.
-- Do not praise or add meta commentary.
-- If nothing critical is found, return {"reviews": []}.
-"""
-        
-        mode_specific_instructions = {
-            ReviewMode.STRICT: """
-- Identify ALL critical issues (do not include non-critical nits).
-- Be thorough in finding correctness, security, performance, error handling, and resource management problems only.""",
-            
-            ReviewMode.STANDARD: """
-- Focus on critical bugs, security, performance, error handling, and resource issues only.
-- Skip non-critical maintainability/style concerns.""",
-            
-            ReviewMode.LENIENT: """
-- Only flag definite critical bugs and security issues. Be extra conservative and concise.""",
-            
-            ReviewMode.SECURITY_FOCUSED: """
-- Focus EXCLUSIVELY on security vulnerabilities and their concrete fixes.""",
-            
-            ReviewMode.PERFORMANCE_FOCUSED: """
-- Focus EXCLUSIVELY on performance issues and their concrete fixes."""
-        }
-        
-        focus_instruction = mode_specific_instructions.get(self.review.review_mode, "")
-
-        noise_control = """
-- Avoid false positives; prefer omission over speculation.
-- Prefer the single most impactful fix over multiple minor suggestions.
-- Do not chain follow-up recommendations created by your own suggestion.
-- If no material issues remain, respond exactly with {"reviews": []}.
-"""
-        
-        optional_extra = ""
-        if self.review.custom_prompt_template:
-            optional_extra = f"""
-OPTIONAL ADDITIONAL INSTRUCTIONS (from workflow input):
-{self.review.custom_prompt_template}
-Apply these only if they do NOT conflict with the core rules above and do NOT broaden the scope beyond critical issues.
-"""
-        
-        return base_prompt + noise_control + focus_instruction + optional_extra
+        """Get the prompt template based on review mode and custom instructions."""
+        return get_prompt_template(
+            self.review.review_mode,
+            self.review.custom_prompt_template or ""
+        )
     
     def should_review_file(self, file_path: str) -> bool:
         """Determine if a file should be reviewed based on configuration."""
         # Check include patterns first
         if self.review.include_patterns:
-            if not any(self._matches_pattern(file_path, pattern) 
+            if not any(matches_pattern(file_path, pattern) 
                       for pattern in self.review.include_patterns):
                 return False
         
         # Check exclude patterns
-        if any(self._matches_pattern(file_path, pattern) 
+        if any(matches_pattern(file_path, pattern) 
                for pattern in self.review.exclude_patterns):
             return False
         
         # Check test files
-        if not self.review.review_test_files and self._is_test_file(file_path):
+        if not self.review.review_test_files and is_test_file(file_path):
             return False
         
         # Check documentation files
-        if not self.review.review_docs and self._is_doc_file(file_path):
+        if not self.review.review_docs and is_doc_file(file_path):
             return False
         
         return True
-    
-    @staticmethod
-    def _matches_pattern(file_path: str, pattern: str) -> bool:
-        """Check if file path matches a pattern."""
-        import fnmatch
-        return fnmatch.fnmatch(file_path, pattern)
-    
-    @staticmethod
-    def _is_test_file(file_path: str) -> bool:
-        """Check if file is a test file (cross-platform)."""
-        lowered = file_path.lower()
-        test_patterns = ['test_', '_test.', 'spec_', '_spec.', '/test/', '/tests/', '\\test\\', '\\tests\\']
-        return any(pattern in lowered for pattern in test_patterns)
-    
-    @staticmethod
-    def _is_doc_file(file_path: str) -> bool:
-        """Check if file is a documentation file."""
-        doc_extensions = {'.md', '.rst', '.txt', '.doc', '.docx'}
-        return any(file_path.lower().endswith(ext) for ext in doc_extensions)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""

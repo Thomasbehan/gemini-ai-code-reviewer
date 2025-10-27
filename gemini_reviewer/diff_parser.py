@@ -11,6 +11,7 @@ from typing import List, Dict, Any, Optional, Iterator
 from unidiff import PatchSet, PatchedFile, Hunk
 
 from .models import DiffFile, FileInfo, HunkInfo
+from .utils import matches_pattern, get_file_language
 
 
 logger = logging.getLogger(__name__)
@@ -315,13 +316,13 @@ class DiffParser:
             
             # Check include patterns
             if include_patterns:
-                if not any(self._matches_pattern(file_path, pattern) for pattern in include_patterns):
+                if not any(matches_pattern(file_path, pattern) for pattern in include_patterns):
                     logger.debug(f"File {file_path} doesn't match include patterns")
                     continue
             
             # Check exclude patterns
             if exclude_patterns:
-                if any(self._matches_pattern(file_path, pattern) for pattern in exclude_patterns):
+                if any(matches_pattern(file_path, pattern) for pattern in exclude_patterns):
                     logger.debug(f"File {file_path} matches exclude pattern")
                     continue
             
@@ -390,12 +391,6 @@ class DiffParser:
         
         return filtered_files
     
-    @staticmethod
-    def _matches_pattern(file_path: str, pattern: str) -> bool:
-        """Check if file path matches a pattern using glob matching."""
-        import fnmatch
-        return fnmatch.fnmatch(file_path, pattern)
-    
     def get_parsing_statistics(self) -> Dict[str, Any]:
         """Get parsing statistics."""
         return {
@@ -412,25 +407,6 @@ class DiffParser:
         self._skipped_files_count = 0
         self._total_additions = 0
         self._total_deletions = 0
-    
-    @staticmethod
-    def get_file_language(file_path: str) -> Optional[str]:
-        """Detect programming language from file extension."""
-        if not file_path or '.' not in file_path:
-            return None
-        
-        extension = file_path.split('.')[-1].lower()
-        language_mapping = {
-            'py': 'Python', 'js': 'JavaScript', 'ts': 'TypeScript',
-            'jsx': 'React', 'tsx': 'TypeScript React',
-            'java': 'Java', 'cpp': 'C++', 'c': 'C', 'cs': 'C#',
-            'go': 'Go', 'rs': 'Rust', 'php': 'PHP', 'rb': 'Ruby',
-            'swift': 'Swift', 'kt': 'Kotlin', 'scala': 'Scala',
-            'html': 'HTML', 'css': 'CSS', 'scss': 'SCSS',
-            'json': 'JSON', 'yaml': 'YAML', 'yml': 'YAML',
-            'sql': 'SQL', 'sh': 'Shell', 'bash': 'Bash'
-        }
-        return language_mapping.get(extension)
     
     @staticmethod
     def analyze_diff_complexity(diff_files: List[DiffFile]) -> Dict[str, Any]:

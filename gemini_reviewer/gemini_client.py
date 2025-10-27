@@ -15,6 +15,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from .config import GeminiConfig, ReviewMode
 from .models import AIResponse, ReviewPriority, AnalysisContext, HunkInfo, PRDetails
+from .utils import get_file_language, sanitize_text, sanitize_code_content
 
 
 logger = logging.getLogger(__name__)
@@ -158,16 +159,18 @@ class GeminiClient:
     ) -> str:
         """Create a comprehensive analysis prompt with project context."""
         # Sanitize inputs
-        sanitized_content = self._sanitize_code_content(hunk.content)
-        sanitized_title = self._sanitize_text(context.pr_details.title)
-        sanitized_description = self._sanitize_text(context.pr_details.description or "No description provided")
+        sanitized_content = sanitize_code_content(hunk.content)
+        sanitized_title = sanitize_text(context.pr_details.title)
+        sanitized_description = sanitize_text(context.pr_details.description or "No description provided")
         
         # Add context information
         context_info = []
         if context.file_info:
             context_info.append(f"File: {context.file_info.path}")
             if context.file_info.file_extension:
-                context_info.append(f"Language: {self._detect_language(context.file_info.file_extension)}")
+                language = get_file_language(context.file_info.path)
+                if language and language != 'unknown':
+                    context_info.append(f"Language: {language}")
         
         if context.is_test_file:
             context_info.append("Note: This is a test file")
@@ -385,7 +388,7 @@ class GeminiClient:
             if not comment or len(comment.strip()) == 0:
                 logger.warning("Empty review comment after normalization")
                 return None
-            comment = self._sanitize_text(comment)
+            comment = sanitize_text(comment)
             
             # Optional: anchor snippet tying the comment to a concrete line
             anchor_snippet = None
@@ -683,52 +686,6 @@ class GeminiClient:
             return max(0.0, min(1.0, confidence))  # Clamp to [0, 1]
         except (ValueError, TypeError):
             return None
-    
-    def _detect_language(self, file_extension: str) -> str:
-        """Detect programming language from file extension."""
-        language_mapping = {
-            'py': 'Python', 'js': 'JavaScript', 'ts': 'TypeScript',
-            'java': 'Java', 'cpp': 'C++', 'c': 'C', 'cs': 'C#',
-            'go': 'Go', 'rs': 'Rust', 'php': 'PHP', 'rb': 'Ruby',
-            'swift': 'Swift', 'kt': 'Kotlin', 'scala': 'Scala',
-            'html': 'HTML', 'css': 'CSS', 'scss': 'SCSS', 'sass': 'SASS',
-            'xml': 'XML', 'json': 'JSON', 'yaml': 'YAML', 'yml': 'YAML',
-            'sql': 'SQL', 'sh': 'Shell', 'bash': 'Bash', 'ps1': 'PowerShell'
-        }
-        return language_mapping.get(file_extension.lower(), 'Unknown')
-    
-    @staticmethod
-    def _sanitize_text(text: str) -> str:
-        """Lightly sanitize text while preserving Markdown/code formatting.
-        - Keeps backticks and symbols so code fences and inline code render correctly.
-        - Removes null bytes and non-printable control characters.
-        - Trims surrounding whitespace.
-        GitHub renders Markdown safely, so additional HTML escaping is unnecessary here.
-        """
-        if not isinstance(text, str):
-            return str(text) if text is not None else ""
-        
-        # Remove null bytes and control characters except common whitespace (tab/newline/carriage return)
-        cleaned = ''.join(ch for ch in text if (ord(ch) >= 32) or ch in '\t\n\r')
-        
-        return cleaned.strip()
-    
-    @staticmethod
-    def _sanitize_code_content(content: str) -> str:
-        """Sanitize code content while preserving structure."""
-        if not isinstance(content, str):
-            return str(content) if content is not None else ""
-        
-        # For code content, we're more lenient but still remove obvious injection attempts
-        lines = content.split('\n')
-        sanitized_lines = []
-        
-        for line in lines:
-            # Remove null bytes and control characters but keep normal code characters
-            sanitized_line = ''.join(char for char in line if ord(char) >= 32 or char in '\t\n\r')
-            sanitized_lines.append(sanitized_line)
-        
-        return '\n'.join(sanitized_lines)
     
     def get_statistics(self) -> Dict[str, Any]:
         """Get client usage statistics."""

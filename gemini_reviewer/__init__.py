@@ -21,6 +21,8 @@ from .models import (
 from .github_client import GitHubClient, GitHubClientError
 from .gemini_client import GeminiClient, GeminiClientError
 from .diff_parser import DiffParser, DiffParsingError
+from .context_builder import ContextBuilder
+from .comment_processor import CommentProcessor
 
 __all__ = [
     # Main classes
@@ -35,4 +37,6 @@ __all__ = [
     'GitHubClient', 'GitHubClientError',
     'GeminiClient', 'GeminiClientError', 
     'DiffParser', 'DiffParsingError',
+    'ContextBuilder',
+    'CommentProcessor',
 ]

@@ -19,6 +19,8 @@ from .models import (
 from .github_client import GitHubClient, GitHubClientError
 from .gemini_client import GeminiClient, GeminiClientError
 from .diff_parser import DiffParser, DiffParsingError
+from .context_builder import ContextBuilder
+from .comment_processor import CommentProcessor
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,8 @@ class CodeReviewer:
         self.github_client = GitHubClient(config.github)
         self.gemini_client = GeminiClient(config.gemini)
         self.diff_parser = DiffParser()
+        self.context_builder = ContextBuilder(self.github_client, self.diff_parser)
+        self.comment_processor = CommentProcessor(config.review, self.github_client)
         
         # Cache of existing AI comment signatures for this PR/session to avoid re-generating the same comments
         self._existing_comment_signatures: Set[str] = set()
@@ -332,8 +336,8 @@ class CodeReviewer:
         skipped_pre_existing = 0
         
         # Detect related files and gather project context
-        related_files = await self._detect_related_files(diff_file, pr_details)
-        project_context = await self._build_project_context(diff_file, related_files, pr_details)
+        related_files = await self.context_builder.detect_related_files(diff_file, pr_details)
+        project_context = await self.context_builder.build_project_context(diff_file, related_files, pr_details)
         
         # Create enhanced analysis context with project understanding
         context = AnalysisContext(
@@ -361,7 +365,7 @@ class CodeReviewer:
                 
                 # Convert AI responses to review comments
                 for ai_response in ai_responses:
-                    comment = self._convert_to_review_comment(
+                    comment = self.comment_processor.convert_to_review_comment(
                         ai_response, diff_file, hunk, hunk_index
                     )
                     if comment:
@@ -392,259 +396,6 @@ class CodeReviewer:
         logger.debug(f"Generated {len(file_comments)} comments for {file_path}")
         return file_comments
     
-    async def _detect_related_files(self, diff_file: DiffFile, pr_details: PRDetails) -> List[str]:
-        """Detect related files based on imports and dependencies."""
-        file_path = diff_file.file_info.path
-        related_files = []
-        
-        try:
-            # Extract imports/requires/includes from the file content
-            import_patterns = {
-                'python': [r'from\s+(\S+)\s+import', r'import\s+(\S+)'],
-                'javascript': [r'import\s+.*\s+from\s+["\']([^"\']+)["\']', r'require\(["\']([^"\']+)["\']\)'],
-                'typescript': [r'import\s+.*\s+from\s+["\']([^"\']+)["\']', r'require\(["\']([^"\']+)["\']\)'],
-                'java': [r'import\s+([^;]+);'],
-                'go': [r'import\s+["\']([^"\']+)["\']', r'import\s+\(\s*["\']([^"\']+)["\']'],
-                'ruby': [r'require\s+["\']([^"\']+)["\']'],
-            }
-            
-            language = self.diff_parser.get_file_language(file_path)
-            
-            if language and language.lower() in import_patterns:
-                import re
-                patterns = import_patterns[language.lower()]
-                
-                # Analyze the hunk content for imports
-                for hunk in diff_file.hunks:
-                    for line in hunk.lines:
-                        # Only look at added or context lines, not deleted lines
-                        if line.startswith('-'):
-                            continue
-                        
-                        clean_line = line[1:] if line else line  # Remove +/- prefix
-                        
-                        for pattern in patterns:
-                            matches = re.findall(pattern, clean_line)
-                            for match in matches:
-                                # Convert import path to file path
-                                related_file = self._import_to_file_path(match, file_path, language)
-                                if related_file and related_file not in related_files:
-                                    related_files.append(related_file)
-            
-            # Limit to most relevant files to avoid token bloat
-            related_files = related_files[:5]
-            
-            if related_files:
-                logger.info(f"Detected {len(related_files)} related files for {file_path}")
-            
-        except Exception as e:
-            logger.debug(f"Error detecting related files for {file_path}: {str(e)}")
-        
-        return related_files
-    
-    def _import_to_file_path(self, import_path: str, current_file: str, language: str) -> Optional[str]:
-        """Convert an import path to a file path."""
-        try:
-            import os
-            
-            # Handle relative imports
-            if import_path.startswith('.'):
-                current_dir = os.path.dirname(current_file)
-                # Count leading dots
-                dots = len(import_path) - len(import_path.lstrip('.'))
-                # Go up directories
-                for _ in range(dots - 1):
-                    current_dir = os.path.dirname(current_dir)
-                import_path = import_path.lstrip('.')
-                base_path = os.path.join(current_dir, import_path.replace('.', '/'))
-            else:
-                # For absolute imports, try common patterns
-                base_path = import_path.replace('.', '/')
-            
-            # Add appropriate extensions based on language
-            extensions = {
-                'python': ['.py', '/__init__.py'],
-                'javascript': ['.js', '/index.js', '.jsx'],
-                'typescript': ['.ts', '/index.ts', '.tsx'],
-                'java': ['.java'],
-                'go': ['.go'],
-                'ruby': ['.rb']
-            }
-            
-            possible_paths = []
-            if language.lower() in extensions:
-                for ext in extensions[language.lower()]:
-                    possible_paths.append(base_path + ext)
-            
-            # Return the first plausible path
-            return possible_paths[0] if possible_paths else None
-            
-        except Exception:
-            return None
-    
-    async def _build_project_context(self, diff_file: DiffFile, related_files: List[str], pr_details: PRDetails) -> Optional[str]:
-        """Build project context including previous comments and related file contents."""
-        context_parts = []
-        max_context_size = 8000  # Limit total context to avoid token bloat
-        current_size = 0
-        
-        try:
-            # Always include previous inline comments on this file (if any)
-            try:
-                prev = self.github_client.get_file_review_comments(pr_details, diff_file.file_info.path, limit=30)
-                if prev:
-                    # Keep this small; it helps verify resolutions
-                    snippet = prev
-                    if len(snippet) > 2000:
-                        snippet = snippet[:2000] + "\n... (truncated)"
-                    context_parts.append(f"### Previous review history for {diff_file.file_info.path}\n{snippet}\n")
-                    current_size += len(snippet)
-            except Exception:
-                pass
-            
-            # Related files content
-            for related_file in related_files or []:
-                if current_size >= max_context_size:
-                    break
-                
-                # Try to fetch the file content from the base branch
-                content = self.github_client.get_file_content(
-                    pr_details.owner,
-                    pr_details.repo,
-                    related_file,
-                    pr_details.base_sha or 'main'
-                )
-                
-                if content:
-                    # Limit individual file size
-                    if len(content) > 2000:
-                        content = content[:2000] + "\n... (truncated)"
-                    
-                    context_parts.append(f"### Related file: {related_file}\n```\n{content}\n```\n")
-                    current_size += len(content)
-            
-            if context_parts:
-                logger.info(f"Built project context with {len(context_parts)} block(s) (~{current_size} chars)")
-                return "\n".join(context_parts)
-                
-        except Exception as e:
-            logger.debug(f"Error building project context: {str(e)}")
-        
-        return None
-    
-    def _convert_to_review_comment(
-        self,
-        ai_response,
-        diff_file: DiffFile,
-        hunk: HunkInfo,
-        hunk_index: int
-    ) -> Optional[ReviewComment]:
-        """Convert AI response to GitHub review comment with basic anchoring validation.
-        Tries to ensure the comment targets the correct line by matching an anchor snippet
-        to the diff lines. If mismatch, attempts to realign; otherwise discards to avoid noise.
-        """
-        try:
-            # Start with the provided position as 1-based index within this hunk
-            position = int(ai_response.line_number)
-
-            # Helper to strip diff prefix and get comparable content
-            def _line_payload(s: str) -> str:
-                if not s:
-                    return ""
-                # Remove leading diff marker and one space if present
-                if s[0] in ['+', '-', ' ']:
-                    s = s[1:]
-                return s.lstrip('\t ')
-
-            # Guard: position within bounds
-            if position < 1 or position > len(hunk.lines):
-                logger.warning(f"Line number {position} is outside hunk range (1..{len(hunk.lines)})")
-                return None
-
-            anchor = getattr(ai_response, 'anchor_snippet', None)
-            anchor = anchor.strip() if isinstance(anchor, str) else None
-
-            # If we have an anchor, validate alignment; else try to infer from comment
-            if not anchor:
-                # Try to infer from inline code span in the comment
-                body = ai_response.review_comment or ""
-                if '`' in body:
-                    try:
-                        import re as _re
-                        m = _re.search(r"`([^`\n]+)`", body)
-                        if m:
-                            candidate = m.group(1).strip()
-                            if len(candidate) >= 2:
-                                anchor = candidate
-                    except Exception:
-                        pass
-
-            # If we have an anchor snippet, attempt validation and possible realignment
-            if anchor:
-                target_line = _line_payload(hunk.lines[position - 1])
-                if anchor not in target_line:
-                    # Search for best match within the hunk
-                    matches = []
-                    for idx, raw in enumerate(hunk.lines, start=1):
-                        payload = _line_payload(raw)
-                        if anchor in payload:
-                            matches.append(idx)
-                    if len(matches) == 1:
-                        # Realign to the unique matching line
-                        logger.info(f"Realigning comment from line {position} to {matches[0]} based on anchor match")
-                        position = matches[0]
-                    elif len(matches) > 1:
-                        # Prefer lines with additions ('+')
-                        add_matches = [i for i in matches if hunk.lines[i - 1].startswith('+')]
-                        if len(add_matches) == 1:
-                            position = add_matches[0]
-                            logger.info(f"Realigning to added line {position} among multiple matches")
-                        else:
-                            # Fall back to nearest match to original
-                            nearest = min(matches, key=lambda i: abs(i - position))
-                            logger.info(f"Multiple matches; choosing nearest line {nearest} to original {position}")
-                            position = nearest
-                    else:
-                        # No match: discard to avoid unrelated comment
-                        logger.warning("Anchor snippet not found in hunk; discarding comment to avoid misalignment")
-                        return None
-
-            # Prefer commenting on added lines; if current is deletion-only, try to nudge to nearby added/context
-            if hunk.lines[position - 1].startswith('-'):
-                # Look within a small window for a '+' or ' ' line
-                window = range(max(1, position - 2), min(len(hunk.lines), position + 2) + 1)
-                preferred = None
-                for i in window:
-                    if hunk.lines[i - 1].startswith('+'):
-                        preferred = i
-                        break
-                if not preferred:
-                    for i in window:
-                        if hunk.lines[i - 1].startswith(' '):
-                            preferred = i
-                            break
-                if preferred:
-                    logger.info(f"Adjusting position from deletion line {position} to nearby line {preferred}")
-                    position = preferred
-
-            # Final bounds check
-            if position < 1 or position > len(hunk.lines):
-                return None
-
-            comment = ReviewComment(
-                body=ai_response.review_comment,
-                path=diff_file.file_info.path,
-                position=position,
-                line_number=position,
-                priority=ai_response.priority,
-                category=ai_response.category
-            )
-            return comment
-
-        except Exception as e:
-            logger.warning(f"Error converting AI response to comment: {str(e)}")
-            return None
-    
     async def _create_github_review(self, pr_details: PRDetails, comments: List[ReviewComment], preferred_event: Optional[str] = None) -> bool:
         """Create GitHub review with comments.
         If preferred_event is provided, it will be used instead of auto-deciding.
@@ -659,10 +410,10 @@ class CodeReviewer:
             logger.info(f"After deduplication, {total_comments} comments remain to consider.")
             
             # Filter comments by priority if configured
-            filtered_comments = self._filter_comments_by_priority(comments)
+            filtered_comments = self.comment_processor.filter_comments_by_priority(comments)
 
             # Apply per-file and total caps to reduce noise
-            limited_comments = self._apply_comment_limits(filtered_comments)
+            limited_comments = self.comment_processor.apply_comment_limits(filtered_comments)
             
             # If there are no issues at all, skip creating a review to avoid noise
             if total_comments == 0 and not limited_comments:
@@ -708,87 +459,6 @@ class CodeReviewer:
         except GitHubClientError as e:
             logger.error(f"Failed to create GitHub review: {str(e)}")
             return False
-    
-    def _filter_comments_by_priority(self, comments: List[ReviewComment]) -> List[ReviewComment]:
-        """Filter comments based on priority threshold."""
-        if not comments:
-            return []
-        
-        priority_order = {
-            ReviewPriority.CRITICAL: 4,
-            ReviewPriority.HIGH: 3,
-            ReviewPriority.MEDIUM: 2,
-            ReviewPriority.LOW: 1
-        }
-        
-        threshold_value = priority_order.get(self.config.review.priority_threshold, 1)
-        
-        filtered_comments = []
-        for comment in comments:
-            comment_value = priority_order.get(comment.priority, 1)
-            if comment_value >= threshold_value:
-                filtered_comments.append(comment)
-        
-        if len(filtered_comments) != len(comments):
-            logger.info(f"Filtered {len(comments)} comments to {len(filtered_comments)} "
-                       f"based on priority threshold ({self.config.review.priority_threshold.value})")
-        
-        return filtered_comments
-    
-    def _apply_comment_limits(self, comments: List[ReviewComment]) -> List[ReviewComment]:
-        """Apply per-file and total comment caps to reduce noise.
-        Keeps highest-priority items first and preserves stable ordering among equals.
-        """
-        if not comments:
-            return []
-        
-        # Map priority to numeric for sorting
-        priority_order = {
-            ReviewPriority.CRITICAL: 4,
-            ReviewPriority.HIGH: 3,
-            ReviewPriority.MEDIUM: 2,
-            ReviewPriority.LOW: 1
-        }
-        
-        per_file_cap = max(0, int(getattr(self.config.review, 'max_comments_per_file', 0)))
-        total_cap = max(0, int(getattr(self.config.review, 'max_comments_total', 0)))
-        
-        # If no caps configured, return as-is
-        if per_file_cap == 0 and total_cap == 0:
-            return comments
-        
-        # Group by file
-        by_file: Dict[str, List[ReviewComment]] = {}
-        for cm in comments:
-            by_file.setdefault(cm.path, []).append(cm)
-        
-        # For determinism, within each file, sort by priority (desc) but keep stable original order for ties
-        def sort_key(cm: ReviewComment):
-            return (-priority_order.get(cm.priority, 1))
-        
-        selected: List[ReviewComment] = []
-        dropped_due_to_file_cap = 0
-        for path, group in by_file.items():
-            if per_file_cap > 0 and len(group) > per_file_cap:
-                sorted_group = sorted(group, key=sort_key)
-                kept = sorted_group[:per_file_cap]
-                dropped_due_to_file_cap += len(group) - len(kept)
-                selected.extend(kept)
-            else:
-                selected.extend(sorted(group, key=sort_key))
-        
-        if dropped_due_to_file_cap:
-            logger.info(f"Applied per-file cap: dropped {dropped_due_to_file_cap} comments exceeding {per_file_cap}/file")
-        
-        # Apply total cap across all files
-        if total_cap > 0 and len(selected) > total_cap:
-            # Sort globally by priority, stable among equals by original relative order (already grouped)
-            selected_sorted = sorted(selected, key=sort_key)
-            limited = selected_sorted[:total_cap]
-            logger.info(f"Applied total cap: reduced {len(selected)} to {len(limited)} comments (cap={total_cap})")
-            return limited
-        
-        return selected
     
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive processing statistics."""
