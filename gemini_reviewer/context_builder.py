@@ -200,6 +200,354 @@ class ContextBuilder:
             logger.debug(f"Error scanning repository structure: {str(e)}")
             return ""
     
+    def _find_reverse_dependencies(self, changed_file: str) -> List[str]:
+        """Find files that import or depend on the changed file.
+        
+        Args:
+            changed_file: Path to the changed file
+            
+        Returns:
+            List of file paths that depend on the changed file
+        """
+        reverse_deps = []
+        try:
+            repo_root = os.getcwd()
+            changed_module = changed_file.replace('/', '.').replace('\\', '.')
+            # Remove extension for module name
+            for ext in ['.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb']:
+                if changed_module.endswith(ext):
+                    changed_module = changed_module[:-len(ext)]
+                    break
+            
+            # Also check for the filename without path for relative imports
+            changed_filename = os.path.basename(changed_file)
+            changed_name = os.path.splitext(changed_filename)[0]
+            
+            # Patterns to search for imports
+            import_patterns = [
+                rf'from\s+{re.escape(changed_module)}\s+import',
+                rf'import\s+{re.escape(changed_module)}',
+                rf'from\s+.*{re.escape(changed_name)}\s+import',
+                rf'import\s+.*{re.escape(changed_name)}',
+                rf'require\(["\'].*{re.escape(changed_filename)}["\']\)',
+                rf'import\s+.*from\s+["\'].*{re.escape(changed_filename)}["\']',
+            ]
+            
+            # Search through code files
+            code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
+            exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'build', 'dist'}
+            
+            for root, dirs, files in os.walk(repo_root):
+                dirs[:] = [d for d in dirs if d not in exclude_dirs]
+                
+                for filename in files:
+                    file_ext = os.path.splitext(filename)[1]
+                    if file_ext not in code_extensions:
+                        continue
+                    
+                    file_path = os.path.join(root, filename)
+                    rel_path = os.path.relpath(file_path, repo_root)
+                    
+                    # Skip the changed file itself
+                    if rel_path == changed_file:
+                        continue
+                    
+                    try:
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        
+                        # Check if any pattern matches
+                        for pattern in import_patterns:
+                            if re.search(pattern, content):
+                                reverse_deps.append(rel_path)
+                                break  # Found a match, no need to check other patterns
+                        
+                        if len(reverse_deps) >= 10:  # Limit to 10 reverse dependencies
+                            break
+                    except Exception:
+                        continue
+                
+                if len(reverse_deps) >= 10:
+                    break
+            
+            logger.info(f"Found {len(reverse_deps)} reverse dependencies for {changed_file}")
+        except Exception as e:
+            logger.debug(f"Error finding reverse dependencies: {str(e)}")
+        
+        return reverse_deps
+    
+    def _find_test_files(self, changed_file: str) -> List[str]:
+        """Find test files related to the changed file.
+        
+        Args:
+            changed_file: Path to the changed file
+            
+        Returns:
+            List of related test file paths
+        """
+        test_files = []
+        try:
+            repo_root = os.getcwd()
+            changed_name = os.path.splitext(os.path.basename(changed_file))[0]
+            changed_dir = os.path.dirname(changed_file)
+            
+            # Common test patterns
+            test_patterns = [
+                f'test_{changed_name}',
+                f'{changed_name}_test',
+                f'test{changed_name}',
+                changed_name,  # Test file might have same name in test directory
+            ]
+            
+            test_dirs = {'test', 'tests', '__tests__', 'spec', 'specs'}
+            test_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
+            
+            # Search in test directories
+            for root, dirs, files in os.walk(repo_root):
+                # Prioritize test directories
+                dir_name = os.path.basename(root)
+                in_test_dir = any(test_dir in root for test_dir in test_dirs)
+                
+                for filename in files:
+                    file_ext = os.path.splitext(filename)[1]
+                    if file_ext not in test_extensions:
+                        continue
+                    
+                    file_lower = filename.lower()
+                    # Check if filename matches test patterns
+                    if in_test_dir or file_lower.startswith('test') or file_lower.endswith('test' + file_ext):
+                        # Check if it's related to our changed file
+                        for pattern in test_patterns:
+                            if pattern in file_lower:
+                                file_path = os.path.join(root, filename)
+                                rel_path = os.path.relpath(file_path, repo_root)
+                                test_files.append(rel_path)
+                                break
+                    
+                    if len(test_files) >= 5:  # Limit to 5 test files
+                        break
+                
+                if len(test_files) >= 5:
+                    break
+            
+            logger.info(f"Found {len(test_files)} test files for {changed_file}")
+        except Exception as e:
+            logger.debug(f"Error finding test files: {str(e)}")
+        
+        return test_files
+    
+    def _find_config_files(self) -> List[str]:
+        """Find configuration files (linters, build scripts, Dockerfiles, etc.).
+        
+        Returns:
+            List of configuration file paths
+        """
+        config_files = []
+        try:
+            repo_root = os.getcwd()
+            
+            # Important config file patterns
+            config_patterns = [
+                # Linters and formatters
+                '.eslintrc', '.eslintrc.js', '.eslintrc.json', '.eslintrc.yml',
+                '.prettierrc', '.prettierrc.js', '.prettierrc.json',
+                '.pylintrc', 'pylint.cfg', '.flake8', 'tox.ini',
+                '.mypy.ini', 'mypy.ini', 'pyproject.toml',
+                # Build and dependency management
+                'package.json', 'package-lock.json', 'yarn.lock',
+                'requirements.txt', 'Pipfile', 'Pipfile.lock', 'poetry.lock',
+                'go.mod', 'go.sum', 'Gemfile', 'Gemfile.lock',
+                'build.gradle', 'pom.xml', 'Makefile',
+                # Docker and containerization
+                'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml',
+                '.dockerignore',
+                # CI/CD
+                '.travis.yml', 'circle.yml', '.gitlab-ci.yml',
+                'azure-pipelines.yml', 'Jenkinsfile',
+                # GitHub specific
+                'action.yml', 'action.yaml',
+                # Editor and IDE
+                '.editorconfig',
+                # Git
+                '.gitignore', '.gitattributes',
+            ]
+            
+            # Search for config files in root and common directories
+            search_dirs = [repo_root, os.path.join(repo_root, '.github')]
+            
+            for search_dir in search_dirs:
+                if not os.path.exists(search_dir):
+                    continue
+                
+                try:
+                    for item in os.listdir(search_dir):
+                        if item in config_patterns or any(item.startswith(p) for p in ['Dockerfile', '.env']):
+                            file_path = os.path.join(search_dir, item)
+                            if os.path.isfile(file_path):
+                                rel_path = os.path.relpath(file_path, repo_root)
+                                config_files.append(rel_path)
+                except Exception:
+                    continue
+            
+            logger.info(f"Found {len(config_files)} config files")
+        except Exception as e:
+            logger.debug(f"Error finding config files: {str(e)}")
+        
+        return config_files
+    
+    def _build_repo_mental_model(self) -> str:
+        """Build a compact repo-level mental model with key information.
+        
+        Returns:
+            Formatted string with repo overview
+        """
+        model_parts = []
+        
+        try:
+            repo_root = os.getcwd()
+            
+            # 1. Documentation summaries (README, CONTRIBUTING, etc.)
+            doc_files = ['README.md', 'README.rst', 'CONTRIBUTING.md', 'ARCHITECTURE.md', 
+                        'ADR.md', 'DESIGN.md', 'docs/README.md']
+            
+            for doc_file in doc_files:
+                doc_path = os.path.join(repo_root, doc_file)
+                if os.path.exists(doc_path):
+                    try:
+                        with open(doc_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        
+                        # Extract first 1000 chars or first few sections
+                        lines = content.split('\n')
+                        summary_lines = []
+                        char_count = 0
+                        
+                        for line in lines[:50]:  # First 50 lines max
+                            summary_lines.append(line)
+                            char_count += len(line)
+                            if char_count > 1000:
+                                break
+                        
+                        summary = '\n'.join(summary_lines)
+                        if len(content) > char_count:
+                            summary += "\n... (truncated)"
+                        
+                        model_parts.append(f"## {doc_file} Summary:\n{summary}\n")
+                    except Exception:
+                        pass
+            
+            # 2. Entrypoints identification
+            entrypoint_files = [
+                'main.py', 'app.py', '__main__.py', 'run.py', 'server.py',
+                'index.js', 'index.ts', 'main.js', 'main.ts', 'app.js', 'app.ts',
+                'main.go', 'cmd/main.go',
+                'setup.py', 'setup.cfg', 'pyproject.toml',
+                'action.yml', 'action.yaml',
+                'Dockerfile', 'docker-compose.yml',
+            ]
+            
+            found_entrypoints = []
+            for entry in entrypoint_files:
+                entry_path = os.path.join(repo_root, entry)
+                if os.path.exists(entry_path) and os.path.isfile(entry_path):
+                    found_entrypoints.append(entry)
+            
+            if found_entrypoints:
+                model_parts.append(f"## Entrypoints:\n" + "\n".join(f"- {e}" for e in found_entrypoints) + "\n")
+            
+            # 3. Package/dependency management and scripts
+            pkg_files = {
+                'package.json': ['scripts', 'dependencies', 'devDependencies'],
+                'pyproject.toml': ['tool.poetry.scripts', 'project.scripts'],
+                'requirements.txt': None,
+                'Pipfile': ['scripts'],
+                'go.mod': ['module', 'require'],
+                'Gemfile': None,
+            }
+            
+            for pkg_file, keys_to_extract in pkg_files.items():
+                pkg_path = os.path.join(repo_root, pkg_file)
+                if os.path.exists(pkg_path):
+                    try:
+                        with open(pkg_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                        
+                        # For JSON files, try to extract scripts
+                        if pkg_file.endswith('.json'):
+                            import json
+                            try:
+                                data = json.loads(content)
+                                scripts_info = []
+                                for key in keys_to_extract or []:
+                                    if key in data and isinstance(data[key], dict):
+                                        scripts_info.append(f"  {key}:")
+                                        for name, cmd in list(data[key].items())[:10]:
+                                            scripts_info.append(f"    - {name}: {cmd}")
+                                
+                                if scripts_info:
+                                    model_parts.append(f"## {pkg_file}:\n" + "\n".join(scripts_info) + "\n")
+                            except json.JSONDecodeError:
+                                pass
+                        else:
+                            # For other files, include a snippet
+                            lines = content.split('\n')[:20]
+                            model_parts.append(f"## {pkg_file} (first 20 lines):\n" + "\n".join(lines) + "\n")
+                    except Exception:
+                        pass
+            
+            # 4. CI/CD workflows
+            ci_dirs = [
+                os.path.join(repo_root, '.github', 'workflows'),
+                os.path.join(repo_root, '.gitlab'),
+                os.path.join(repo_root, '.circleci'),
+            ]
+            
+            workflow_files = []
+            for ci_dir in ci_dirs:
+                if os.path.exists(ci_dir):
+                    try:
+                        for item in os.listdir(ci_dir):
+                            if item.endswith(('.yml', '.yaml')):
+                                workflow_files.append(os.path.relpath(os.path.join(ci_dir, item), repo_root))
+                    except Exception:
+                        pass
+            
+            if workflow_files:
+                model_parts.append(f"## CI/CD Workflows:\n" + "\n".join(f"- {w}" for w in workflow_files) + "\n")
+            
+            # 5. Environment samples and lockfiles
+            env_files = []
+            for item in ['.env.example', '.env.sample', '.env.template', 
+                        'package-lock.json', 'yarn.lock', 'poetry.lock', 
+                        'Pipfile.lock', 'go.sum', 'Gemfile.lock']:
+                item_path = os.path.join(repo_root, item)
+                if os.path.exists(item_path):
+                    env_files.append(item)
+            
+            if env_files:
+                model_parts.append(f"## Environment & Lockfiles:\n" + "\n".join(f"- {e}" for e in env_files) + "\n")
+            
+            # 6. Service boundaries / Architecture (detect major directories)
+            major_dirs = []
+            try:
+                for item in os.listdir(repo_root):
+                    item_path = os.path.join(repo_root, item)
+                    if os.path.isdir(item_path) and not item.startswith('.'):
+                        if item not in {'node_modules', '__pycache__', 'venv', '.venv', 'build', 'dist'}:
+                            major_dirs.append(item)
+            except Exception:
+                pass
+            
+            if major_dirs:
+                model_parts.append(f"## Major Packages/Modules:\n" + "\n".join(f"- {d}/" for d in major_dirs[:15]) + "\n")
+            
+        except Exception as e:
+            logger.debug(f"Error building repo mental model: {str(e)}")
+        
+        if model_parts:
+            return "# Repository Mental Model\n\n" + "\n".join(model_parts)
+        return ""
+    
     def _extract_code_signatures(self, max_files: int = 50) -> str:
         """Extract function and class signatures from code files in the repository.
         
@@ -322,8 +670,8 @@ class ContextBuilder:
         related_files: List[str], 
         pr_details: PRDetails
     ) -> Optional[str]:
-        """Build project context including full repository structure, code signatures, 
-        previous comments, and related file contents.
+        """Build project context including repo mental model, dependency-adjacent code,
+        full repository structure, code signatures, previous comments, and related file contents.
         
         Args:
             diff_file: The diff file being analyzed
@@ -334,19 +682,61 @@ class ContextBuilder:
             Formatted project context string or None if no context available
         """
         context_parts = []
-        max_context_size = 20000  # Increased limit to accommodate full repo context
+        max_context_size = 30000  # Increased limit to accommodate enhanced context layers
         current_size = 0
         
         try:
-            # STEP 1: Add full repository structure
-            logger.info("Building full repository context for comprehensive code review")
-            repo_structure = self._scan_repository_structure()
-            if repo_structure:
-                context_parts.append(f"### Full Repository Structure\n{repo_structure}\n")
-                current_size += len(repo_structure)
-                logger.info(f"Added repository structure ({len(repo_structure)} chars)")
+            logger.info("Building comprehensive repository context for code review")
             
-            # STEP 2: Add code signatures from all files
+            # LAYER 1: Repo-level mental model (HIGHEST PRIORITY)
+            # Provides understanding of the entire codebase structure, entrypoints, docs, etc.
+            repo_mental_model = self._build_repo_mental_model()
+            if repo_mental_model:
+                context_parts.append(repo_mental_model)
+                current_size += len(repo_mental_model)
+                logger.info(f"Added repo mental model ({len(repo_mental_model)} chars)")
+            
+            # LAYER 2: Dependency-adjacent code
+            # Files that import/are imported by changed files, tests, and configs
+            if current_size < max_context_size:
+                dep_adjacent_parts = []
+                
+                # 2a. Reverse dependencies (files that import this file)
+                reverse_deps = self._find_reverse_dependencies(diff_file.file_info.path)
+                if reverse_deps:
+                    dep_adjacent_parts.append(f"#### Reverse Dependencies (files that import {diff_file.file_info.path}):\n" + 
+                                             "\n".join(f"- {rd}" for rd in reverse_deps))
+                    logger.info(f"Found {len(reverse_deps)} reverse dependencies")
+                
+                # 2b. Related test files
+                test_files = self._find_test_files(diff_file.file_info.path)
+                if test_files:
+                    dep_adjacent_parts.append(f"#### Related Test Files:\n" + 
+                                             "\n".join(f"- {tf}" for tf in test_files))
+                    logger.info(f"Found {len(test_files)} test files")
+                
+                # 2c. Configuration files
+                config_files = self._find_config_files()
+                if config_files:
+                    dep_adjacent_parts.append(f"#### Configuration Files:\n" + 
+                                             "\n".join(f"- {cf}" for cf in config_files[:15]))  # Limit to 15
+                    logger.info(f"Found {len(config_files)} config files")
+                
+                if dep_adjacent_parts:
+                    dep_section = "### Dependency-Adjacent Code\n\n" + "\n\n".join(dep_adjacent_parts) + "\n"
+                    context_parts.append(dep_section)
+                    current_size += len(dep_section)
+                    logger.info(f"Added dependency-adjacent code section ({len(dep_section)} chars)")
+            
+            # STEP 3: Add full repository structure
+            if current_size < max_context_size:
+                repo_structure = self._scan_repository_structure()
+                if repo_structure:
+                    context_parts.append(f"### Full Repository Structure\n{repo_structure}\n")
+                    current_size += len(repo_structure)
+                    logger.info(f"Added repository structure ({len(repo_structure)} chars)")
+            
+            # STEP 4: Add code signatures from all files
             if current_size < max_context_size:
                 code_signatures = self._extract_code_signatures()
                 if code_signatures:
@@ -354,7 +744,7 @@ class ContextBuilder:
                     current_size += len(code_signatures)
                     logger.info(f"Added code signatures ({len(code_signatures)} chars)")
             
-            # STEP 3: Always include previous inline comments on this file (if any)
+            # STEP 5: Always include previous inline comments on this file (if any)
             if current_size < max_context_size:
                 try:
                     prev = self.github_client.get_file_review_comments(
@@ -372,7 +762,7 @@ class ContextBuilder:
                 except Exception:
                     pass
             
-            # Related files content
+            # STEP 6: Forward dependencies (related files content)
             for related_file in related_files or []:
                 if current_size >= max_context_size:
                     break
@@ -390,11 +780,11 @@ class ContextBuilder:
                     if len(content) > 2000:
                         content = content[:2000] + "\n... (truncated)"
                     
-                    context_parts.append(f"### Related file: {related_file}\n```\n{content}\n```\n")
+                    context_parts.append(f"### Related file (forward dependency): {related_file}\n```\n{content}\n```\n")
                     current_size += len(content)
             
             if context_parts:
-                logger.info(f"Built project context with {len(context_parts)} block(s) (~{current_size} chars)")
+                logger.info(f"Built comprehensive project context with {len(context_parts)} sections (~{current_size} chars)")
                 return "\n".join(context_parts)
                 
         except Exception as e:
