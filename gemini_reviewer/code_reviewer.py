@@ -21,6 +21,7 @@ from .gemini_client import GeminiClient, GeminiClientError
 from .diff_parser import DiffParser, DiffParsingError
 from .context_builder import ContextBuilder
 from .comment_processor import CommentProcessor
+from .utils import get_file_language
 
 
 logger = logging.getLogger(__name__)
@@ -372,7 +373,7 @@ class CodeReviewer:
         context = AnalysisContext(
             pr_details=pr_details,
             file_info=diff_file.file_info,
-            language=self.diff_parser.get_file_language(file_path),
+            language=get_file_language(file_path),
             related_files=related_files,
             project_context=project_context
         )
