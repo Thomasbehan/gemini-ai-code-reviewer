@@ -456,11 +456,11 @@ class CodeReviewer:
         return file_comments
     
     async def _resolve_completed_comments(self, pr_details: PRDetails) -> None:
-        """Check for resolved comments after a follow-up review and mark them as resolved.
+        """Check for resolved comments after a follow-up review and post replies to them.
         
         Strategy: In follow-up mode, if the AI found NO issues (or only found that specific
         previous comments are still not resolved), then all OTHER previous comments that
-        weren't mentioned are considered resolved.
+        weren't mentioned are considered resolved. We post a reply comment to acknowledge this.
         """
         if not hasattr(self, '_previous_bot_comments') or not self._previous_bot_comments:
             return
@@ -469,7 +469,7 @@ class CodeReviewer:
             return
         
         try:
-            logger.info("Checking for resolved comments to mark on GitHub...")
+            logger.info("Checking for resolved comments to reply to on GitHub...")
             
             # Get all the current review comments that were just posted
             # These would be complaints about unresolved issues
@@ -490,20 +490,20 @@ class CodeReviewer:
                         was_flagged = True
                         break
                 
-                # If not flagged in the follow-up, mark as resolved
+                # If not flagged in the follow-up, post a reply to acknowledge the fix
                 if not was_flagged:
-                    success = self.github_client.resolve_comment_thread(pr_details, comment_id)
+                    success = self.github_client.reply_to_comment(pr_details, comment_id)
                     if success:
                         resolved_count += 1
-                        logger.info(f"Marked comment #{comment_index} as resolved (file: {prev_comment['path']})")
+                        logger.info(f"Posted resolution reply to comment #{comment_index} (file: {prev_comment['path']})")
             
             if resolved_count > 0:
-                logger.info(f"✅ Marked {resolved_count} comment(s) as resolved on GitHub")
+                logger.info(f"✅ Posted {resolved_count} resolution reply/replies on GitHub")
             else:
-                logger.info("No comments were marked as resolved (all issues still present or no resolutions detected)")
+                logger.info("No resolution replies posted (all issues still present or no resolutions detected)")
                 
         except Exception as e:
-            logger.warning(f"Error while resolving comments: {str(e)}")
+            logger.warning(f"Error while posting resolution replies: {str(e)}")
 
     async def _create_github_review(self, pr_details: PRDetails, comments: List[ReviewComment], preferred_event: Optional[str] = None) -> bool:
         """Create GitHub review with comments.

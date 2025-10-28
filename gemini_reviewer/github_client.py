@@ -921,187 +921,51 @@ class GitHubClient:
             logger.debug(f"Deduplication failed (continuing without dedupe): {e}")
             return comments
 
-    def _get_thread_id_for_comment(self, pr_details: PRDetails, comment_id: int) -> Optional[str]:
-        """Get the review thread ID for a given comment ID.
-        
-        GitHub's GraphQL API requires the thread ID (not comment ID) to resolve threads.
-        This method queries the PR's review threads and finds the thread containing the comment.
-        
-        Args:
-            pr_details: Pull request details
-            comment_id: The REST API comment ID (databaseId in GraphQL)
-            
-        Returns:
-            The thread ID if found, None otherwise
-        """
-        try:
-            # Parse owner and repo from repo_full_name
-            parts = pr_details.repo_full_name.split('/')
-            if len(parts) != 2:
-                logger.warning(f"Invalid repo_full_name format: {pr_details.repo_full_name}")
-                return None
-            
-            owner, repo = parts
-            
-            # GraphQL query to fetch review threads and their comments
-            query = """
-            query($owner: String!, $repo: String!, $pr: Int!) {
-              repository(owner: $owner, name: $repo) {
-                pullRequest(number: $pr) {
-                  reviewThreads(first: 100) {
-                    nodes {
-                      id
-                      isResolved
-                      comments(first: 50) {
-                        nodes {
-                          id
-                          databaseId
-                          body
-                        }
-                      }
-                    }
-                    pageInfo {
-                      hasNextPage
-                      endCursor
-                    }
-                  }
-                }
-              }
-            }
-            """
-            
-            variables = {
-                "owner": owner,
-                "repo": repo,
-                "pr": pr_details.pull_number
-            }
-            
-            headers = {
-                "Authorization": f"Bearer {self.config.token}",
-                "Content-Type": "application/json"
-            }
-            
-            response = requests.post(
-                "https://api.github.com/graphql",
-                json={"query": query, "variables": variables},
-                headers=headers,
-                timeout=self.config.timeout
-            )
-            
-            if response.status_code != 200:
-                logger.warning(f"Failed to fetch review threads: HTTP {response.status_code}")
-                return None
-            
-            result = response.json()
-            
-            if 'errors' in result:
-                logger.warning(f"GraphQL errors fetching review threads: {result['errors']}")
-                return None
-            
-            # Navigate through the response to find threads
-            try:
-                threads = result['data']['repository']['pullRequest']['reviewThreads']['nodes']
-            except (KeyError, TypeError) as e:
-                logger.warning(f"Unexpected GraphQL response structure: {e}")
-                return None
-            
-            # Search for the comment in the threads
-            for thread in threads:
-                if not thread or 'comments' not in thread:
-                    continue
-                
-                comments = thread.get('comments', {}).get('nodes', [])
-                for comment in comments:
-                    if not comment:
-                        continue
-                    
-                    # Match by databaseId (the REST API comment ID)
-                    if comment.get('databaseId') == comment_id:
-                        thread_id = thread.get('id')
-                        if thread_id:
-                            logger.debug(f"Found thread ID {thread_id} for comment {comment_id}")
-                            return thread_id
-            
-            logger.debug(f"No thread found containing comment {comment_id}")
-            return None
-            
-        except Exception as e:
-            logger.warning(f"Error getting thread ID for comment {comment_id}: {str(e)}")
-            return None
 
-    def resolve_comment_thread(self, pr_details: PRDetails, comment_id: int) -> bool:
-        """Mark a review comment thread as resolved.
+    def reply_to_comment(self, pr_details: PRDetails, comment_id: int, reply_body: str = "✅ This has been fixed thank you") -> bool:
+        """Post a reply to an existing review comment.
         
-        This method correctly resolves threads by:
-        1. Finding the thread ID that contains the comment (via GraphQL query)
-        2. Using that thread ID in the resolveReviewThread mutation
+        This method posts a reply comment to indicate that an issue has been resolved.
         
         Args:
             pr_details: Pull request details
-            comment_id: The ID of the review comment (REST API ID / databaseId)
+            comment_id: The ID of the review comment to reply to
+            reply_body: The text of the reply (default: "✅ This has been fixed thank you")
             
         Returns:
             True if successful, False otherwise
         """
         try:
-            # Get the thread ID for this comment
-            thread_id = self._get_thread_id_for_comment(pr_details, comment_id)
+            # Use GitHub REST API to post a reply to the comment
+            # Endpoint: POST /repos/{owner}/{repo}/pulls/comments/{comment_id}/replies
+            url = f"https://api.github.com/repos/{pr_details.owner}/{pr_details.repo}/pulls/comments/{comment_id}/replies"
             
-            if not thread_id:
-                logger.info(f"Thread not found for comment {comment_id} (likely already resolved or deleted)")
-                return False
-            
-            # GraphQL mutation to resolve the thread
-            mutation = """
-            mutation($threadId: ID!) {
-              resolveReviewThread(input: {threadId: $threadId}) {
-                thread {
-                  id
-                  isResolved
-                }
-              }
-            }
-            """
-            
-            variables = {"threadId": thread_id}
-            
-            # Execute GraphQL request
             headers = {
                 "Authorization": f"Bearer {self.config.token}",
+                "Accept": "application/vnd.github.v3+json",
                 "Content-Type": "application/json"
             }
             
+            payload = {
+                "body": reply_body
+            }
+            
             response = requests.post(
-                "https://api.github.com/graphql",
-                json={"query": mutation, "variables": variables},
+                url,
+                json=payload,
                 headers=headers,
                 timeout=self.config.timeout
             )
             
-            if response.status_code == 200:
-                result = response.json()
-                if 'errors' in result:
-                    logger.warning(f"GraphQL error resolving thread for comment {comment_id}: {result['errors']}")
-                    return False
-                
-                # Check if the thread was successfully resolved
-                try:
-                    is_resolved = result['data']['resolveReviewThread']['thread']['isResolved']
-                    if is_resolved:
-                        logger.info(f"✅ Successfully marked comment {comment_id} (thread {thread_id}) as resolved")
-                        return True
-                    else:
-                        logger.warning(f"Thread resolution returned success but isResolved=False for comment {comment_id}")
-                        return False
-                except (KeyError, TypeError) as e:
-                    logger.warning(f"Unexpected response structure when resolving comment {comment_id}: {e}")
-                    return False
+            if response.status_code == 201:
+                logger.info(f"✅ Successfully posted reply to comment {comment_id}")
+                return True
             else:
-                logger.warning(f"Failed to resolve comment {comment_id}: HTTP {response.status_code}")
+                logger.warning(f"Failed to reply to comment {comment_id}: HTTP {response.status_code} - {response.text}")
                 return False
                 
         except Exception as e:
-            logger.warning(f"Failed to resolve comment thread {comment_id}: {str(e)}")
+            logger.warning(f"Failed to reply to comment {comment_id}: {str(e)}")
             return False
 
     def get_file_review_comments(self, pr_details: PRDetails, file_path: str, limit: int = 30) -> Optional[str]:
