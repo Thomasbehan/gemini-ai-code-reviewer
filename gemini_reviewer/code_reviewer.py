@@ -52,6 +52,7 @@ class CodeReviewer:
         # Track if this is a follow-up review and store previous comments
         self._is_followup_review: bool = False
         self._previous_comments: str = ""
+        self._current_followup_issues: Set[str] = set()  # Track which files/paths still have issues in follow-up
         
         # Statistics tracking
         self.stats = ProcessingStats(start_time=time.time())
@@ -80,8 +81,9 @@ class CodeReviewer:
                 existing_bot_comments = self.github_client.get_existing_bot_comments(pr_details)
                 if existing_bot_comments:
                     self._is_followup_review = True
-                    # Format previous comments for the AI
+                    # Format previous comments for the AI and store ID mapping
                     formatted_comments = []
+                    self._comment_id_mapping = {}  # Map comment index to comment ID
                     for i, comment in enumerate(existing_bot_comments, 1):
                         formatted_comments.append(
                             f"{i}. File: {comment['path']}\n"
@@ -89,16 +91,24 @@ class CodeReviewer:
                             f"   Comment: {comment['body']}\n"
                             f"   Posted: {comment.get('created_at', 'N/A')}"
                         )
+                        # Store mapping of comment index to ID for resolution later
+                        if comment.get('id'):
+                            self._comment_id_mapping[i] = comment['id']
                     self._previous_comments = "\n\n".join(formatted_comments)
+                    self._previous_bot_comments = existing_bot_comments  # Store full comment data
                     logger.info(f"🔄 FOLLOW-UP REVIEW MODE: Found {len(existing_bot_comments)} previous bot comments. AI will ONLY check if they were resolved.")
                 else:
                     self._is_followup_review = False
                     self._previous_comments = ""
+                    self._comment_id_mapping = {}
+                    self._previous_bot_comments = []
                     logger.info("✨ FIRST REVIEW: No previous bot comments found. AI will perform initial comprehensive review.")
             except Exception as _e:
                 logger.debug(f"Could not determine review type: {_e}")
                 self._is_followup_review = False
                 self._previous_comments = ""
+                self._comment_id_mapping = {}
+                self._previous_bot_comments = []
             
             # Create initial result object
             result = ReviewResult(pr_details=pr_details)
@@ -154,6 +164,10 @@ class CodeReviewer:
             else:
                 # Per-file reviews have already been posted; skip aggregated final review to avoid large payloads.
                 logger.info("Per-file reviews posted; skipping aggregated final review to avoid large payloads.")
+            
+            # If this was a follow-up review, check for resolved comments and mark them
+            if self._is_followup_review:
+                await self._resolve_completed_comments(pr_details)
             
             # Finalize statistics
             self.stats.end_time = time.time()
@@ -434,9 +448,63 @@ class CodeReviewer:
                 logger.error(f"Unexpected error analyzing hunk in {file_path}: {str(e)}")
                 continue
         
+        # Track files with issues during follow-up review for resolution checking
+        if self._is_followup_review and file_comments:
+            self._current_followup_issues.add(file_path)
+        
         logger.debug(f"Generated {len(file_comments)} comments for {file_path}")
         return file_comments
     
+    async def _resolve_completed_comments(self, pr_details: PRDetails) -> None:
+        """Check for resolved comments after a follow-up review and mark them as resolved.
+        
+        Strategy: In follow-up mode, if the AI found NO issues (or only found that specific
+        previous comments are still not resolved), then all OTHER previous comments that
+        weren't mentioned are considered resolved.
+        """
+        if not hasattr(self, '_previous_bot_comments') or not self._previous_bot_comments:
+            return
+        
+        if not hasattr(self, '_comment_id_mapping') or not self._comment_id_mapping:
+            return
+        
+        try:
+            logger.info("Checking for resolved comments to mark on GitHub...")
+            
+            # Get all the current review comments that were just posted
+            # These would be complaints about unresolved issues
+            current_issues = getattr(self, '_current_followup_issues', set())
+            
+            # For each previous comment, if it's not in the current issues, it's resolved
+            resolved_count = 0
+            for comment_index, comment_id in self._comment_id_mapping.items():
+                # Check if this comment was flagged as still problematic
+                # We'll use a simple heuristic: if the comment path+line wasn't mentioned
+                # in the new review, it's resolved
+                prev_comment = self._previous_bot_comments[comment_index - 1]
+                was_flagged = False
+                
+                # Check if any current issues match this previous comment's location
+                for issue_key in current_issues:
+                    if prev_comment['path'] in issue_key:
+                        was_flagged = True
+                        break
+                
+                # If not flagged in the follow-up, mark as resolved
+                if not was_flagged:
+                    success = self.github_client.resolve_comment_thread(pr_details, comment_id)
+                    if success:
+                        resolved_count += 1
+                        logger.info(f"Marked comment #{comment_index} as resolved (file: {prev_comment['path']})")
+            
+            if resolved_count > 0:
+                logger.info(f"✅ Marked {resolved_count} comment(s) as resolved on GitHub")
+            else:
+                logger.info("No comments were marked as resolved (all issues still present or no resolutions detected)")
+                
+        except Exception as e:
+            logger.warning(f"Error while resolving comments: {str(e)}")
+
     async def _create_github_review(self, pr_details: PRDetails, comments: List[ReviewComment], preferred_event: Optional[str] = None) -> bool:
         """Create GitHub review with comments.
         If preferred_event is provided, it will be used instead of auto-deciding.

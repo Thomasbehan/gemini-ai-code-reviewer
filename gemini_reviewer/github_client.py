@@ -773,7 +773,7 @@ class GitHubClient:
     def get_existing_bot_comments(self, pr_details: PRDetails) -> List[Dict[str, Any]]:
         """Fetch all existing bot review comments with their full content for follow-up reviews.
         
-        Returns a list of dicts with keys: path, line, body, created_at
+        Returns a list of dicts with keys: path, line, body, created_at, id, comment_obj
         Only includes comments that appear to be from the bot (have AI-SIG marker or match bot username).
         """
         try:
@@ -811,7 +811,9 @@ class GitHubClient:
                             'path': path,
                             'line': getattr(c, 'original_line', getattr(c, 'line', None)),
                             'body': cleaned_body,
-                            'created_at': str(getattr(c, 'created_at', ''))
+                            'created_at': str(getattr(c, 'created_at', '')),
+                            'id': getattr(c, 'id', None),
+                            'comment_obj': c  # Store the full comment object for resolution
                         })
                 except Exception:
                     continue
@@ -918,6 +920,91 @@ class GitHubClient:
         except Exception as e:
             logger.debug(f"Deduplication failed (continuing without dedupe): {e}")
             return comments
+
+    def resolve_comment_thread(self, pr_details: PRDetails, comment_id: int) -> bool:
+        """Mark a review comment thread as resolved.
+        
+        Args:
+            pr_details: Pull request details
+            comment_id: The ID of the review comment to resolve
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # GitHub's REST API doesn't directly support resolving threads via PyGithub
+            # We need to use the GraphQL API or the REST API endpoint directly
+            # Using GraphQL API for thread resolution
+            
+            # First, get the comment to find its thread ID
+            repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
+            pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
+            
+            # Get the review comment
+            try:
+                comments = pr.get_review_comments()
+                target_comment = None
+                for c in comments:
+                    if getattr(c, 'id', None) == comment_id:
+                        target_comment = c
+                        break
+                
+                if not target_comment:
+                    logger.warning(f"Comment ID {comment_id} not found in PR #{pr_details.pull_number}")
+                    return False
+                
+                # Use GitHub's GraphQL API to resolve the thread
+                # The comment object should have a node_id we can use
+                node_id = getattr(target_comment, 'node_id', None)
+                if not node_id:
+                    logger.warning(f"Comment ID {comment_id} has no node_id, cannot resolve")
+                    return False
+                
+                # GraphQL mutation to resolve the thread
+                mutation = """
+                mutation($threadId: ID!) {
+                  resolveReviewThread(input: {threadId: $threadId}) {
+                    thread {
+                      id
+                      isResolved
+                    }
+                  }
+                }
+                """
+                
+                variables = {"threadId": node_id}
+                
+                # Execute GraphQL request
+                headers = {
+                    "Authorization": f"Bearer {self.config.token}",
+                    "Content-Type": "application/json"
+                }
+                
+                response = requests.post(
+                    "https://api.github.com/graphql",
+                    json={"query": mutation, "variables": variables},
+                    headers=headers,
+                    timeout=self.config.timeout
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if 'errors' in result:
+                        logger.warning(f"GraphQL error resolving comment {comment_id}: {result['errors']}")
+                        return False
+                    logger.info(f"✅ Successfully marked comment {comment_id} as resolved")
+                    return True
+                else:
+                    logger.warning(f"Failed to resolve comment {comment_id}: HTTP {response.status_code}")
+                    return False
+                    
+            except Exception as e:
+                logger.warning(f"Error resolving comment {comment_id}: {str(e)}")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"Failed to resolve comment thread {comment_id}: {str(e)}")
+            return False
 
     def get_file_review_comments(self, pr_details: PRDetails, file_path: str, limit: int = 30) -> Optional[str]:
         """Get previous inline review comments for a specific file in the PR.
