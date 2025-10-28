@@ -104,7 +104,7 @@ class ReviewConfig:
 @dataclass
 class PerformanceConfig:
     """Configuration for performance optimization."""
-    enable_concurrent_processing: bool = True
+    enable_concurrent_processing: bool = False
     max_concurrent_files: int = 3
     max_concurrent_api_calls: int = 5
     chunk_size: int = 10
