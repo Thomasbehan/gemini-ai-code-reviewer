@@ -117,12 +117,38 @@ class GeminiClient:
         try:
             response = self._model.generate_content(prompt, generation_config=self._generation_config)
             
-            if not response or not hasattr(response, 'text'):
-                raise GeminiClientError("Empty or invalid response from Gemini API")
+            if not response:
+                raise GeminiClientError("Empty response from Gemini API")
+            
+            # Check if response has valid parts before accessing text
+            # finish_reason values: 1=STOP (normal), 2=MAX_TOKENS, 3=SAFETY, 4=RECITATION, 5=OTHER
+            if hasattr(response, 'candidates') and response.candidates:
+                candidate = response.candidates[0]
+                finish_reason = getattr(candidate, 'finish_reason', None)
+                
+                # If content was filtered (safety/recitation), return empty result with warning
+                if finish_reason in [3, 4]:  # SAFETY or RECITATION
+                    reason_name = "SAFETY" if finish_reason == 3 else "RECITATION"
+                    logger.warning(f"Gemini API response filtered due to {reason_name} settings (finish_reason={finish_reason}). "
+                                 "This is expected for some code patterns and does not indicate an error. "
+                                 "Returning empty review for this hunk.")
+                    # Return empty JSON array to indicate no reviews for this hunk
+                    return "[]"
+                
+                # Check if there are valid parts in the response
+                if not hasattr(candidate, 'content') or not candidate.content or not candidate.content.parts:
+                    logger.warning(f"Response has no valid parts (finish_reason={finish_reason}). Returning empty review.")
+                    return "[]"
+            
+            # Try to access the text - this may still fail for other reasons
+            if not hasattr(response, 'text'):
+                logger.warning("Response object has no text attribute. Returning empty review.")
+                return "[]"
             
             response_text = response.text.strip()
             if not response_text:
-                raise GeminiClientError("Empty response text from Gemini API")
+                logger.warning("Empty response text from Gemini API. Returning empty review.")
+                return "[]"
             
             logger.debug(f"Received response (length: {len(response_text)})")
             
@@ -139,6 +165,12 @@ class GeminiClient:
             
         except Exception as e:
             error_msg = str(e).lower()
+            
+            # Check if this is the specific "response.text requires valid Part" error
+            if "response.text" in error_msg and "valid" in error_msg and "part" in error_msg:
+                logger.warning(f"Response filtered by Gemini API (likely safety/content policy). "
+                             "This is expected for some code patterns. Returning empty review for this hunk.")
+                return "[]"
             
             if "quota" in error_msg or "rate limit" in error_msg:
                 logger.warning("Gemini API rate limit or quota exceeded")
