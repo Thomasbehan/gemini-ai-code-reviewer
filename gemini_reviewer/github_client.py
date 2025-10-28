@@ -678,10 +678,15 @@ class GitHubClient:
         return "\n".join(summary_parts)
     
     def _generate_approval_message(self) -> str:
-        """Generate a message when no issues are found and we want to explicitly approve."""
+        """Generate a message when the analysis yields no actionable issues.
+        Used for both first reviews (no issues found) and follow-ups (all previous issues resolved).
+        """
         return (
-            "🤖 Gemini AI Code Review\n\n"
-            "This code looks great!"
+            "🤖 **Gemini AI Code Review**\n\n"
+            "✅ Code review completed — everything looks good.\n\n"
+            "- No critical issues were found in the analyzed changes, or\n"
+            "- All previously reported issues appear to be resolved.\n\n"
+            "> If you believe something was missed, feel free to re-run the review after additional changes."
         )
     
     def _generate_filtered_message(self, total_comments: int) -> str:

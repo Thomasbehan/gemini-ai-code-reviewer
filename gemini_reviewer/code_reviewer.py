@@ -595,10 +595,9 @@ class CodeReviewer:
             # Apply per-file and total caps to reduce noise
             limited_comments = self.comment_processor.apply_comment_limits(filtered_comments)
             
-            # If there are no issues at all, skip creating a review to avoid noise
+            # If there are no issues, we'll still create a positive review to acknowledge clean changes
             if total_comments == 0 and not limited_comments:
-                logger.info("No issues found - skipping review creation to avoid noise")
-                return True
+                logger.info("No issues found - posting a positive review to acknowledge that everything looks good.")
             
             # Determine review event
             # Note: Using COMMENT instead of APPROVE because GitHub Actions tokens
