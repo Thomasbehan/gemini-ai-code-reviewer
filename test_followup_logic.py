@@ -46,6 +46,9 @@ def test_followup_review():
     assert "FOLLOW-UP REVIEW" in prompt
     assert "DO NOT raise any new issues" in prompt
     assert "ONLY check if the previous comments" in prompt
+    # New guidance: deletion-only fixes are valid evidence
+    assert "Fixes that remove problematic code count as valid resolutions" in prompt
+    assert "For deletion-only fixes" in prompt
     assert "Missing error handling for database connection" in prompt
     assert "Potential SQL injection vulnerability" in prompt
     

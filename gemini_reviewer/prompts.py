@@ -122,10 +122,11 @@ CRITICAL RULES FOR FOLLOW-UP REVIEW:
 1. DO NOT raise any new issues, bugs, or concerns.
 2. ONLY check if the previous comments listed below were addressed.
 3. If you cannot find evidence that a previous comment was addressed, mark it as unresolved.
-4. If the previous comment was addressed, do not report it (return empty reviews).
+4. If a previous comment is addressed, do NOT include it in the output (omit it). Only include unresolved items.
 5. Do NOT suggest new improvements, optimizations, or refactorings.
 6. Do NOT comment on code that wasn't mentioned in previous comments.
 7. ONLY focus on verifying the resolution of the specific issues mentioned in previous comments.
+8. IMPORTANT: Fixes that remove problematic code count as valid resolutions. If the fix consists of deleting the previously problematic code (e.g., removing a try/except around lock.acquire()), treat the '-' deletion lines in the diff as evidence of resolution.
 
 PREVIOUS COMMENTS TO VERIFY:
 {previous_comments}
@@ -133,6 +134,7 @@ PREVIOUS COMMENTS TO VERIFY:
 ANCHORING:
 - You review ONE diff hunk at a time; lineNumber is 1-based within this hunk.
 - Prefer '+' lines; use nearby context ' ' lines only if necessary (±3 lines).
+- For deletion-only fixes, it's acceptable to reference nearby context lines if no added lines exist; you may also cite the deleted code in your explanation, but do not output a review item if the issue is resolved.
 - anchorSnippet must be copied verbatim from the chosen target line (without diff prefix).
 
 STRICT OUTPUT RULES:
