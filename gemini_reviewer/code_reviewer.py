@@ -287,8 +287,15 @@ class CodeReviewer:
 
                 # Post comments for this file immediately to avoid large aggregated reviews
                 if file_comments:
-                    logger.info(f"Posting review for file: {diff_file.file_info.path} with {len(file_comments)} comments")
-                    await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
+                    if self._is_followup_review:
+                        logger.info(
+                            f"Posting follow-up replies on previous comments for file: {diff_file.file_info.path} "
+                            f"({len(file_comments)} unresolved item(s))"
+                        )
+                        await self._post_followup_replies(pr_details, diff_file, file_comments)
+                    else:
+                        logger.info(f"Posting review for file: {diff_file.file_info.path} with {len(file_comments)} comments")
+                        await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
                 else:
                     logger.debug(f"No comments for file: {diff_file.file_info.path}")
                 
@@ -352,11 +359,18 @@ class CodeReviewer:
 
                     # Post comments for this file immediately
                     if file_comments:
-                        logger.info(
-                            f"Posting review for file: {diff_file.file_info.path} with "
-                            f"{len(file_comments)} comments"
-                        )
-                        await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
+                        if self._is_followup_review:
+                            logger.info(
+                                f"Posting follow-up replies on previous comments for file: {diff_file.file_info.path} "
+                                f"({len(file_comments)} unresolved item(s))"
+                            )
+                            await self._post_followup_replies(pr_details, diff_file, file_comments)
+                        else:
+                            logger.info(
+                                f"Posting review for file: {diff_file.file_info.path} with "
+                                f"{len(file_comments)} comments"
+                            )
+                            await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
                     else:
                         logger.debug(f"No comments for file: {diff_file.file_info.path}")
                     
@@ -454,6 +468,63 @@ class CodeReviewer:
         
         logger.debug(f"Generated {len(file_comments)} comments for {file_path}")
         return file_comments
+    
+    async def _post_followup_replies(self, pr_details: PRDetails, diff_file: DiffFile, file_comments: List[ReviewComment]) -> None:
+        """Post follow-up findings as replies to the specific previous bot comments they're referring to.
+        Strategy: for each AI comment on a file, reply to the prior bot comment on the same path whose line
+        is closest to the AI comment's line (fallback to most recent if line unavailable).
+        """
+        try:
+            if not getattr(self, '_previous_bot_comments', None):
+                logger.debug("No previous bot comments available to reply to.")
+                return
+            path = diff_file.file_info.path
+            prior_for_path = [c for c in self._previous_bot_comments if c.get('path') == path and c.get('id')]
+            if not prior_for_path:
+                logger.debug(f"No previous bot comments found to reply to for file: {path}")
+                return
+            # Normalize previous entries: ensure numeric line where possible
+            for c in prior_for_path:
+                try:
+                    c['_line_num'] = int(c.get('line')) if c.get('line') is not None else None
+                except Exception:
+                    c['_line_num'] = None
+            # For each new comment, choose best prior by proximity
+            for cm in file_comments:
+                body = getattr(cm, 'body', None)
+                if not body:
+                    continue
+                cm_line = getattr(cm, 'line_number', None)
+                best = None
+                best_dist = None
+                if cm_line is not None:
+                    try:
+                        cm_line = int(cm_line)
+                    except Exception:
+                        cm_line = None
+                if cm_line is not None:
+                    for c in prior_for_path:
+                        pl = c.get('_line_num')
+                        if pl is None:
+                            continue
+                        d = abs(pl - cm_line)
+                        if best is None or d < best_dist:
+                            best = c
+                            best_dist = d
+                # Fallback: most recent prior comment if no line-based match
+                if best is None:
+                    try:
+                        prior_for_path_sorted = sorted(prior_for_path, key=lambda c: c.get('created_at') or '', reverse=True)
+                        best = prior_for_path_sorted[0]
+                    except Exception:
+                        best = prior_for_path[0]
+                target_comment_id = best.get('id')
+                if not target_comment_id:
+                    continue
+                self.github_client.reply_to_comment(pr_details, target_comment_id, body)
+        except Exception as e:
+            logger.debug(f"Failed to post follow-up replies for {diff_file.file_info.path}: {e}")
+            return
     
     async def _resolve_completed_comments(self, pr_details: PRDetails) -> None:
         """Check for resolved comments after a follow-up review and post replies to them.
