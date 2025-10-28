@@ -937,8 +937,9 @@ class GitHubClient:
         """
         try:
             # Use GitHub REST API to post a reply to the comment
-            # Endpoint: POST /repos/{owner}/{repo}/pulls/comments/{comment_id}/replies
-            url = f"https://api.github.com/repos/{pr_details.owner}/{pr_details.repo}/pulls/comments/{comment_id}/replies"
+            # Endpoint: POST /repos/{owner}/{repo}/pulls/{pull_number}/comments
+            # We need to use in_reply_to parameter to specify which comment we're replying to
+            url = f"https://api.github.com/repos/{pr_details.owner}/{pr_details.repo}/pulls/{pr_details.pull_number}/comments"
             
             headers = {
                 "Authorization": f"Bearer {self.config.token}",
@@ -947,7 +948,8 @@ class GitHubClient:
             }
             
             payload = {
-                "body": reply_body
+                "body": reply_body,
+                "in_reply_to": comment_id
             }
             
             response = requests.post(
