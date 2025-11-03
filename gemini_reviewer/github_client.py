@@ -927,10 +927,52 @@ class GitHubClient:
             return comments
 
 
+    def get_comment_replies(self, pr_details: PRDetails, comment_id: int) -> List[Dict[str, Any]]:
+        """Fetch all replies to a specific review comment.
+        
+        Args:
+            pr_details: Pull request details
+            comment_id: The ID of the review comment to fetch replies for
+            
+        Returns:
+            List of reply comment dictionaries with 'id', 'body', 'user' fields
+        """
+        try:
+            # Use GitHub REST API to fetch all review comments
+            url = f"https://api.github.com/repos/{pr_details.owner}/{pr_details.repo}/pulls/{pr_details.pull_number}/comments"
+            
+            headers = {
+                "Authorization": f"Bearer {self.config.token}",
+                "Accept": "application/vnd.github.v3+json"
+            }
+            
+            response = requests.get(
+                url,
+                headers=headers,
+                timeout=self.config.timeout
+            )
+            
+            if response.status_code == 200:
+                all_comments = response.json()
+                # Filter for replies to the specified comment_id
+                replies = [
+                    c for c in all_comments 
+                    if c.get('in_reply_to_id') == comment_id
+                ]
+                return replies
+            else:
+                logger.debug(f"Failed to fetch comment replies: HTTP {response.status_code}")
+                return []
+                
+        except Exception as e:
+            logger.debug(f"Error fetching comment replies: {str(e)}")
+            return []
+
     def reply_to_comment(self, pr_details: PRDetails, comment_id: int, reply_body: str = "✅ This has been fixed thank you") -> bool:
         """Post a reply to an existing review comment.
         
         This method posts a reply comment to indicate that an issue has been resolved.
+        Checks if the same reply already exists to avoid duplicate comments.
         
         Args:
             pr_details: Pull request details
@@ -938,9 +980,21 @@ class GitHubClient:
             reply_body: The text of the reply (default: "✅ This has been fixed thank you")
             
         Returns:
-            True if successful, False otherwise
+            True if successful or reply already exists, False otherwise
         """
         try:
+            # First, check if this reply already exists on the thread
+            existing_replies = self.get_comment_replies(pr_details, comment_id)
+            
+            # Normalize the reply body for comparison (strip whitespace, lowercase)
+            normalized_reply = reply_body.strip().lower()
+            
+            for reply in existing_replies:
+                existing_body = reply.get('body', '')
+                if existing_body.strip().lower() == normalized_reply:
+                    logger.info(f"Reply already exists on comment {comment_id}, skipping duplicate")
+                    return True
+            
             # Use GitHub REST API to post a reply to the comment
             # Endpoint: POST /repos/{owner}/{repo}/pulls/{pull_number}/comments
             # We need to use in_reply_to parameter to specify which comment we're replying to
