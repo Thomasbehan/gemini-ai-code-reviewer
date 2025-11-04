@@ -954,11 +954,47 @@ class GitHubClient:
             
             if response.status_code == 200:
                 all_comments = response.json()
-                # Filter for replies to the specified comment_id
-                replies = [
-                    c for c in all_comments 
-                    if c.get('in_reply_to_id') == comment_id
-                ]
+                
+                # First, find the target comment to get its conversation details
+                target_comment = None
+                for c in all_comments:
+                    if c.get('id') == comment_id:
+                        target_comment = c
+                        break
+                
+                if not target_comment:
+                    logger.debug(f"Target comment {comment_id} not found in PR comments")
+                    return []
+                
+                # Get the path and position of the target comment
+                target_path = target_comment.get('path')
+                target_position = target_comment.get('position') or target_comment.get('original_position')
+                
+                # Filter for replies: either direct replies (in_reply_to_id) or same conversation thread
+                replies = []
+                for c in all_comments:
+                    # Skip the target comment itself
+                    if c.get('id') == comment_id:
+                        continue
+                    
+                    # Direct reply to our target comment
+                    if c.get('in_reply_to_id') == comment_id:
+                        replies.append(c)
+                        continue
+                    
+                    # Part of the same conversation thread (same path and position)
+                    c_path = c.get('path')
+                    c_position = c.get('position') or c.get('original_position')
+                    c_reply_to = c.get('in_reply_to_id')
+                    
+                    # Check if this comment is in the same thread:
+                    # - It's on the same path and position
+                    # - It's a reply to something (part of a thread)
+                    if (c_path == target_path and 
+                        c_position == target_position and 
+                        c_reply_to is not None):
+                        replies.append(c)
+                
                 return replies
             else:
                 logger.debug(f"Failed to fetch comment replies: HTTP {response.status_code}")
