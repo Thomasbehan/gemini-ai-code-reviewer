@@ -46,6 +46,11 @@ SCOPE: Report ONLY issues that must be fixed (critical/serious):
 - Performance Problems
 - Error Handling failures
 - Resource Management (leaks/unclosed handles)
+- Poor Variable/Function Naming that severely impacts readability:
+  * Non-descriptive single-letter names (except standard loop counters i, j, k)
+  * Cryptic abbreviations that obscure meaning
+  * Misleading names that don't match their purpose
+  * Inconsistent naming conventions within the same scope
 - Serious Code Quality / Best Practice violations that impact correctness, security, or performance
 
 ANCHORING:
