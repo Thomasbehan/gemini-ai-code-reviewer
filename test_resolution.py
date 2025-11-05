@@ -13,8 +13,12 @@ from gemini_reviewer.models import PRDetails
 
 
 def test_comment_resolution_logic():
-    """Test the comment resolution logic."""
-    print("Testing comment resolution logic...")
+    """Test the comment resolution logic (conservative policy).
+
+    We no longer auto-mark previous comments as resolved based on absence of new issues.
+    Resolution should only be acknowledged with explicit evidence tied to that comment.
+    """
+    print("Testing comment resolution logic (conservative)...")
     print("="*70)
     
     # Simulate previous comments
@@ -36,19 +40,16 @@ def test_comment_resolution_logic():
     for issue in current_issues:
         print(f"  - {issue}")
     
-    print("\nResolution analysis:")
+    print("\nResolution analysis (no auto-resolution by absence):")
     resolved_comments = []
     for comment in previous_comments:
-        if comment['path'] not in current_issues:
-            resolved_comments.append(comment)
-            print(f"  ✓ Would resolve: {comment['path']} (ID: {comment['id']})")
-        else:
-            print(f"  ✗ Still has issues: {comment['path']} (ID: {comment['id']})")
+        # With the new conservative logic, we do not mark resolved unless there's explicit evidence
+        print(f"  • No auto-resolution for: {comment['path']} (ID: {comment['id']})")
     
     print(f"\nSummary: {len(resolved_comments)}/{len(previous_comments)} comments would be marked as resolved")
     
-    # Verify expected behavior
-    expected_resolved = 2  # file1.py and file3.py should be resolved
+    # Verify expected behavior: zero auto-resolutions
+    expected_resolved = 0
     if len(resolved_comments) == expected_resolved:
         print("✓ Test passed!")
         return True
@@ -57,21 +58,21 @@ def test_comment_resolution_logic():
         return False
 
 
-def test_github_client_resolution_method():
-    """Test that the resolve_comment_thread method exists."""
+def test_github_client_reply_method():
+    """Test that the reply_to_comment method exists and has expected parameters."""
     print("\n" + "="*70)
-    print("Testing GitHub client resolution method...")
+    print("Testing GitHub client reply method...")
     
     try:
         from gemini_reviewer.github_client import GitHubClient
         
         # Check if the method exists
-        if hasattr(GitHubClient, 'resolve_comment_thread'):
-            print("✓ resolve_comment_thread method exists in GitHubClient")
+        if hasattr(GitHubClient, 'reply_to_comment'):
+            print("✓ reply_to_comment method exists in GitHubClient")
             
             # Check method signature
             import inspect
-            sig = inspect.signature(GitHubClient.resolve_comment_thread)
+            sig = inspect.signature(GitHubClient.reply_to_comment)
             params = list(sig.parameters.keys())
             print(f"  Method signature: {params}")
             
@@ -79,10 +80,10 @@ def test_github_client_resolution_method():
                 print("✓ Method has correct parameters")
                 return True
             else:
-                print("✗ Method parameters don't match expected (pr_details, comment_id)")
+                print("✗ Method parameters don't match expected (pr_details, comment_id, [reply_body])")
                 return False
         else:
-            print("✗ resolve_comment_thread method not found in GitHubClient")
+            print("✗ reply_to_comment method not found in GitHubClient")
             return False
             
     except Exception as e:

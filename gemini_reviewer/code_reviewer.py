@@ -527,54 +527,20 @@ class CodeReviewer:
             return
     
     async def _resolve_completed_comments(self, pr_details: PRDetails) -> None:
-        """Check for resolved comments after a follow-up review and post replies to them.
+        """Conservatively acknowledge resolved comments.
         
-        Strategy: In follow-up mode, if the AI found NO issues (or only found that specific
-        previous comments are still not resolved), then all OTHER previous comments that
-        weren't mentioned are considered resolved. We post a reply comment to acknowledge this.
+        IMPORTANT: To avoid false positives, we no longer auto-mark previous comments as resolved
+        based on the absence of new issues. A previous comment should only be marked resolved when
+        there is explicit evidence tied to that exact comment (e.g., a verified follow-up for that
+        path/line). Until such explicit verification is implemented, this method performs no
+        automatic resolutions.
         """
-        if not hasattr(self, '_previous_bot_comments') or not self._previous_bot_comments:
-            return
-        
-        if not hasattr(self, '_comment_id_mapping') or not self._comment_id_mapping:
-            return
-        
         try:
-            logger.info("Checking for resolved comments to reply to on GitHub...")
-            
-            # Get all the current review comments that were just posted
-            # These would be complaints about unresolved issues
-            current_issues = getattr(self, '_current_followup_issues', set())
-            
-            # For each previous comment, if it's not in the current issues, it's resolved
-            resolved_count = 0
-            for comment_index, comment_id in self._comment_id_mapping.items():
-                # Check if this comment was flagged as still problematic
-                # We'll use a simple heuristic: if the comment path+line wasn't mentioned
-                # in the new review, it's resolved
-                prev_comment = self._previous_bot_comments[comment_index - 1]
-                was_flagged = False
-                
-                # Check if any current issues match this previous comment's location
-                for issue_key in current_issues:
-                    if prev_comment['path'] in issue_key:
-                        was_flagged = True
-                        break
-                
-                # If not flagged in the follow-up, post a reply to acknowledge the fix
-                if not was_flagged:
-                    success = self.github_client.reply_to_comment(pr_details, comment_id)
-                    if success:
-                        resolved_count += 1
-                        logger.info(f"Posted resolution reply to comment #{comment_index} (file: {prev_comment['path']})")
-            
-            if resolved_count > 0:
-                logger.info(f"✅ Posted {resolved_count} resolution reply/replies on GitHub")
-            else:
-                logger.info("No resolution replies posted (all issues still present or no resolutions detected)")
-                
-        except Exception as e:
-            logger.warning(f"Error while posting resolution replies: {str(e)}")
+            logger.info("Auto-resolution of previous comments is disabled to prevent false positives.")
+            return
+        except Exception:
+            # No-op safety
+            return
 
     async def _create_github_review(self, pr_details: PRDetails, comments: List[ReviewComment], preferred_event: Optional[str] = None) -> bool:
         """Create GitHub review with comments.
