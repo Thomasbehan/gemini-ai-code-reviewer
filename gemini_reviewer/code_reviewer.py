@@ -54,6 +54,9 @@ class CodeReviewer:
         self._is_followup_review: bool = False
         self._previous_comments: str = ""
         self._current_followup_issues: Set[str] = set()  # Track which files/paths still have issues in follow-up
+        # Track unresolved previous comment IDs detected during follow-up and files reviewed in this run
+        self._unresolved_prior_ids: Set[int] = set()
+        self._current_review_file_paths: Set[str] = set()
         
         # Statistics tracking
         self.stats = ProcessingStats(start_time=time.time())
@@ -80,6 +83,9 @@ class CodeReviewer:
             # Fetch existing bot comments to determine if this is a follow-up review
             try:
                 existing_bot_comments = self.github_client.get_existing_bot_comments(pr_details)
+                # Reset tracking for this run
+                self._unresolved_prior_ids = set()
+                self._current_review_file_paths = set()
                 if existing_bot_comments:
                     self._is_followup_review = True
                     # Format previous comments for the AI and store ID mapping
@@ -152,14 +158,19 @@ class CodeReviewer:
             
             result.comments = comments
             
-            # If there are no comments at all, post an approval review to acknowledge the clean changes
+            # If there are no comments at all
             if len(comments) == 0:
                 if self.stats.files_processed > 0:
-                    logger.info("No comments generated across all files - posting an approval review to acknowledge clean changes.")
-                    try:
-                        await self._create_github_review(pr_details, [], preferred_event="APPROVE")
-                    except Exception as _e:
-                        logger.debug(f"Could not create approval review: {_e}")
+                    if self._is_followup_review:
+                        # In follow-up mode, do not post an "everything looks good" summary.
+                        # Resolved threads will be acknowledged via per-thread replies below.
+                        logger.info("Follow-up review produced no unresolved items; skipping approval summary.")
+                    else:
+                        logger.info("No comments generated across all files - posting an approval review to acknowledge clean changes.")
+                        try:
+                            await self._create_github_review(pr_details, [], preferred_event="APPROVE")
+                        except Exception as _e:
+                            logger.debug(f"Could not create approval review: {_e}")
                 else:
                     logger.info("No comments generated and no files were processed - skipping review creation.")
             else:
@@ -280,6 +291,11 @@ class CodeReviewer:
         
         for i, diff_file in enumerate(unique_files):
             logger.info(f"Analyzing file {i+1}/{len(unique_files)}: {diff_file.file_info.path}")
+            # Track that we reviewed this file path during this run (used for resolution replies)
+            try:
+                self._current_review_file_paths.add(diff_file.file_info.path)
+            except Exception:
+                pass
             
             try:
                 file_comments = await self._analyze_single_file(diff_file, pr_details)
@@ -294,6 +310,11 @@ class CodeReviewer:
                             f"({len(file_comments)} unresolved item(s))"
                         )
                         await self._post_followup_replies(pr_details, diff_file, file_comments)
+                        # Track this path as reviewed
+                        try:
+                            self._current_review_file_paths.add(diff_file.file_info.path)
+                        except Exception:
+                            pass
                     else:
                         logger.info(f"Posting review for file: {diff_file.file_info.path} with {len(file_comments)} comments")
                         await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
@@ -352,6 +373,12 @@ class CodeReviewer:
                     file_comments = future.result()
                     all_comments.extend(file_comments)
                     self.stats.files_processed += 1
+                    
+                    # Track this path as reviewed
+                    try:
+                        self._current_review_file_paths.add(diff_file.file_info.path)
+                    except Exception:
+                        pass
                     
                     logger.debug(
                         f"Completed analysis of {diff_file.file_info.path} (" 
@@ -579,25 +606,66 @@ class CodeReviewer:
                 target_comment_id = best.get('id') if best else None
                 if not target_comment_id:
                     continue
+                # Post the follow-up reply to the matched previous comment
                 self.github_client.reply_to_comment(pr_details, target_comment_id, body)
+                # Track unresolved only if the follow-up indicates not resolved
+                try:
+                    txt = (body or '').lower()
+                    if 'not resolved' in txt or 'unresolved' in txt:
+                        self._unresolved_prior_ids.add(int(target_comment_id))
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug(f"Failed to post follow-up replies for {diff_file.file_info.path}: {e}")
             return
     
     async def _resolve_completed_comments(self, pr_details: PRDetails) -> None:
-        """Conservatively acknowledge resolved comments.
+        """Post a short resolution reply on previous bot comments that appear resolved.
         
-        IMPORTANT: To avoid false positives, we no longer auto-mark previous comments as resolved
-        based on the absence of new issues. A previous comment should only be marked resolved when
-        there is explicit evidence tied to that exact comment (e.g., a verified follow-up for that
-        path/line). Until such explicit verification is implemented, this method performs no
-        automatic resolutions.
+        Rules to minimize false positives:
+        - Only runs in FOLLOW-UP reviews.
+        - Consider only previous bot comments on files we reviewed in this run.
+        - If we posted a follow-up reply indicating Not Resolved for a prior comment, skip it.
+        - Otherwise, post a single standardized resolution reply on that prior comment.
+        - reply_to_comment is duplicate-safe and will not re-post the same message twice.
         """
         try:
-            logger.info("Auto-resolution of previous comments is disabled to prevent false positives.")
-            return
-        except Exception:
-            # No-op safety
+            if not self._is_followup_review:
+                return
+            prior = getattr(self, '_previous_bot_comments', None) or []
+            if not prior:
+                return
+            reviewed_paths = getattr(self, '_current_review_file_paths', None) or set()
+            unresolved_ids = getattr(self, '_unresolved_prior_ids', None) or set()
+
+            # Standard resolution message
+            resolution_msg = "✅ This has been fixed thank you"
+
+            resolved_count = 0
+            considered = 0
+            for c in prior:
+                try:
+                    cid = c.get('id')
+                    path = c.get('path')
+                    if not cid or not path:
+                        continue
+                    # Only consider comments on files we actually reviewed this run
+                    if reviewed_paths and path not in reviewed_paths:
+                        continue
+                    considered += 1
+                    # Skip if we determined this comment is still unresolved
+                    if cid in unresolved_ids or int(cid) in unresolved_ids:
+                        continue
+                    # Post the resolution reply (duplicate-safe)
+                    ok = self.github_client.reply_to_comment(pr_details, int(cid), resolution_msg)
+                    if ok:
+                        resolved_count += 1
+                except Exception:
+                    continue
+            if considered > 0:
+                logger.info(f"Posted resolution replies on {resolved_count}/{considered} previous comment(s) for reviewed files.")
+        except Exception as e:
+            logger.debug(f"Resolution reply phase failed: {e}")
             return
 
     async def _create_github_review(self, pr_details: PRDetails, comments: List[ReviewComment], preferred_event: Optional[str] = None) -> bool:
