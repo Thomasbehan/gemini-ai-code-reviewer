@@ -136,11 +136,60 @@ class CommentProcessor:
             if position < 1 or position > len(hunk.lines):
                 return None
 
+            # Compute global diff position (across all hunks in this file)
+            # GitHub expects 'position' to be the index within the file's entire patch
+            try:
+                prior_hunks_total = 0
+                if hasattr(diff_file, 'hunks') and isinstance(diff_file.hunks, list):
+                    for idx, h in enumerate(diff_file.hunks):
+                        if idx < hunk_index and hasattr(h, 'lines'):
+                            # Each previous hunk contributes its header line ('@@ ... @@') plus its lines
+                            prior_hunks_total += (1 + len(h.lines))
+                # Add 1 for the current hunk header, then add the line index within the hunk
+                file_patch_position = prior_hunks_total + 1 + position
+            except Exception:
+                # Fallback to hunk-local position if anything goes wrong
+                file_patch_position = position
+
+            # Compute best-effort target file line number on the "new" side
+            # by walking the hunk lines from its header target_start
+            file_line_number = None
+            try:
+                cur_target_line = int(getattr(hunk, 'target_start', 0))
+                if cur_target_line <= 0:
+                    cur_target_line = None
+                if cur_target_line is not None:
+                    for idx, raw in enumerate(hunk.lines, start=1):
+                        marker = raw[:1]
+                        if marker == '+':
+                            # this line exists in the new file; count it
+                            if idx == position:
+                                file_line_number = cur_target_line
+                                break
+                            cur_target_line += 1
+                        elif marker == ' ':
+                            # context line exists in both; count it on target
+                            if idx == position:
+                                file_line_number = cur_target_line
+                                break
+                            cur_target_line += 1
+                        else:
+                            # '-' removed from source; does not advance target line
+                            if idx == position and file_line_number is None:
+                                # If we happen to land on a deletion, use current target line as closest anchor
+                                file_line_number = cur_target_line
+                                break
+                # Fallback to the requested hunk position if we couldn't derive a target line
+                if file_line_number is None:
+                    file_line_number = position
+            except Exception:
+                file_line_number = position
+
             comment = ReviewComment(
                 body=ai_response.review_comment,
                 path=diff_file.file_info.path,
-                position=position,
-                line_number=position,
+                position=file_patch_position,
+                line_number=file_line_number,
                 priority=ai_response.priority,
                 category=ai_response.category
             )

@@ -793,7 +793,7 @@ class GitHubClient:
             
             # Get bot username/id if available
             try:
-                current_user = self.client.get_user().login
+                current_user = self._client.get_user().login
             except Exception:
                 current_user = None
             
@@ -815,6 +815,8 @@ class GitHubClient:
                         bot_comments.append({
                             'path': path,
                             'line': getattr(c, 'original_line', getattr(c, 'line', None)),
+                            'position': getattr(c, 'position', getattr(c, 'original_position', None)),
+                            'original_position': getattr(c, 'original_position', None),
                             'body': cleaned_body,
                             'created_at': str(getattr(c, 'created_at', '')),
                             'id': getattr(c, 'id', None),

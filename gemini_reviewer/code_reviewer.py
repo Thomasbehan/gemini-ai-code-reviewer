@@ -8,6 +8,7 @@ and implements concurrent processing for improved performance.
 import asyncio
 import logging
 import time
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional, Set
 
@@ -471,8 +472,10 @@ class CodeReviewer:
     
     async def _post_followup_replies(self, pr_details: PRDetails, diff_file: DiffFile, file_comments: List[ReviewComment]) -> None:
         """Post follow-up findings as replies to the specific previous bot comments they're referring to.
-        Strategy: for each AI comment on a file, reply to the prior bot comment on the same path whose line
-        is closest to the AI comment's line (fallback to most recent if line unavailable).
+        Selection priority per new comment:
+        1) If the body references a "Previous issue: ...", reply to the prior bot comment whose body best matches that text.
+        2) Otherwise, choose the prior bot comment on the same path with nearest diff position (fallback to nearest line number).
+        3) As a last resort, reply to the most recent prior bot comment on the same path.
         """
         try:
             if not getattr(self, '_previous_bot_comments', None):
@@ -483,42 +486,97 @@ class CodeReviewer:
             if not prior_for_path:
                 logger.debug(f"No previous bot comments found to reply to for file: {path}")
                 return
-            # Normalize previous entries: ensure numeric line where possible
+
+            # Normalize previous entries: ensure numeric helpers and normalized body
             for c in prior_for_path:
                 try:
                     c['_line_num'] = int(c.get('line')) if c.get('line') is not None else None
                 except Exception:
                     c['_line_num'] = None
-            # For each new comment, choose best prior by proximity
+                try:
+                    c['_position'] = int(c.get('position')) if c.get('position') is not None else int(c.get('original_position')) if c.get('original_position') is not None else None
+                except Exception:
+                    c['_position'] = None
+                try:
+                    txt = (c.get('body') or '').strip()
+                    # Normalize whitespace and lowercase for robust matching
+                    c['_norm_body'] = re.sub(r"\s+", " ", txt).lower()
+                except Exception:
+                    c['_norm_body'] = (c.get('body') or '').lower()
+
+            # Helper to extract referenced previous issue text from a follow-up body
+            def extract_referenced_issue(text: str) -> str:
+                try:
+                    import re as _re
+                    m = _re.search(r"previous issue\s*:\s*(.+?)\s*(?:status\s*:\s*|$)", text, flags=_re.IGNORECASE | _re.DOTALL)
+                    if m:
+                        return _re.sub(r"\s+", " ", m.group(1)).strip()
+                except Exception:
+                    pass
+                return ""
+
+            # For each new comment, choose the best prior target
             for cm in file_comments:
-                body = getattr(cm, 'body', None)
-                if not body:
+                body = getattr(cm, 'body', None) or ""
+                if not body.strip():
                     continue
-                cm_line = getattr(cm, 'line_number', None)
+
+                # 1) Try content-based matching using the referenced previous issue text
+                referenced = extract_referenced_issue(body)
+                referenced_norm = re.sub(r"\s+", " ", referenced).lower() if referenced else ""
                 best = None
-                best_dist = None
-                if cm_line is not None:
+                best_score = 0.0
+                if referenced_norm:
+                    for c in prior_for_path:
+                        prev_norm = c.get('_norm_body') or ""
+                        if not prev_norm:
+                            continue
+                        # Containment is a strong signal
+                        if referenced_norm and (referenced_norm in prev_norm or prev_norm in referenced_norm):
+                            score = 1.0 if referenced_norm in prev_norm else 0.9
+                        else:
+                            try:
+                                import difflib as _dl
+                                score = _dl.SequenceMatcher(None, referenced_norm, prev_norm).ratio()
+                            except Exception:
+                                score = 0.0
+                        if score > best_score:
+                            best = c
+                            best_score = score
+                
+                # 2) Fallback to nearest diff position/line if no good content match
+                if best is None or best_score < 0.6:
+                    cm_pos = getattr(cm, 'position', None)
+                    cm_line = getattr(cm, 'line_number', None)
                     try:
-                        cm_line = int(cm_line)
+                        cm_pos = int(cm_pos) if cm_pos is not None else None
+                    except Exception:
+                        cm_pos = None
+                    try:
+                        cm_line = int(cm_line) if cm_line is not None else None
                     except Exception:
                         cm_line = None
-                if cm_line is not None:
+
+                    best_dist = None
                     for c in prior_for_path:
-                        pl = c.get('_line_num')
-                        if pl is None:
-                            continue
-                        d = abs(pl - cm_line)
-                        if best is None or d < best_dist:
+                        dist = None
+                        if cm_pos is not None and c.get('_position') is not None:
+                            dist = abs(c.get('_position') - cm_pos)
+                        elif cm_line is not None and c.get('_line_num') is not None:
+                            dist = abs(c.get('_line_num') - cm_line)
+                        if dist is not None and (best is None or dist < best_dist):
                             best = c
-                            best_dist = d
-                # Fallback: most recent prior comment if no line-based match
+                            best_dist = dist
+
+                # 3) Final fallback: most recent prior comment
                 if best is None:
                     try:
                         prior_for_path_sorted = sorted(prior_for_path, key=lambda c: c.get('created_at') or '', reverse=True)
                         best = prior_for_path_sorted[0]
                     except Exception:
                         best = prior_for_path[0]
-                target_comment_id = best.get('id')
+
+                target_comment_id = best.get('id') if best else None
                 if not target_comment_id:
                     continue
                 self.github_client.reply_to_comment(pr_details, target_comment_id, body)
