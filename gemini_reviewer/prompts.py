@@ -26,7 +26,8 @@ REQUIRED OUTPUT FORMAT:
   "reviews": [
     {
       "lineNumber": 1,
-      "reviewComment": "Explain the critical issue (why) and show the minimal fix (how).",
+      "explanation": "XYZ is wrong and heres why... (Explain the issue clearly)",
+      "fixCode": "code block content (just the code, no markdown backticks)",
       "priority": "high",
       "category": "security",
       "anchorSnippet": "exact code from the target line (no +/- prefix)"
@@ -39,6 +40,8 @@ If no issues: {"reviews": []}
 STRICT OUTPUT RULES:
 - Start the response with '{' and end with '}'.
 - No markdown fences around JSON. No conversational text.
+- 'fixCode' must contain valid code replacement.
+- 'explanation' must be concise and actionable.
 
 SCOPE: Report ONLY issues that must be fixed (critical/serious):
 - Bugs & Logic Errors
@@ -61,7 +64,8 @@ ANCHORING:
 
 REVIEW RULES:
 - Be precise and actionable. If uncertain, omit.
-- One short sentence for WHY, then HOW with a minimal code change.
+- In 'explanation', follow the format: "XYZ is wrong and heres why..."
+- In 'fixCode', provide the corrected code snippet.
 - Only include an item if you can propose a concrete fix.
 - Do not propose broad refactors, style nits, or optional improvements.
 - Do not praise or add meta commentary.

@@ -414,7 +414,7 @@ class GeminiClient:
             
             # Normalize comment/message field
             comment_keys = [
-                "reviewComment", "comment", "message", "finding", "text", "body", "description"
+                "explanation", "reviewComment", "comment", "message", "finding", "text", "body", "description"
             ]
             comment: Optional[str] = None
             for k in comment_keys:
@@ -426,6 +426,13 @@ class GeminiClient:
                 return None
             comment = sanitize_text(comment)
             
+            # Extract fix code
+            fix_code = None
+            for k in ["fixCode", "fix", "suggestion", "codeBlock"]:
+                if k in review and review[k]:
+                    fix_code = str(review[k]).strip()
+                    break
+
             # Optional: anchor snippet tying the comment to a concrete line
             anchor_snippet = None
             for k in ["anchorSnippet", "anchor", "snippet", "code", "anchorText"]:
@@ -452,9 +459,9 @@ class GeminiClient:
                     pass
             
             # Require actionable fix: keep only comments that include some code indication
-            if not anchor_snippet and '`' not in comment:
-                logger.info("Discarding non-actionable review (no code snippet/anchor provided)")
-                return None
+            # if not anchor_snippet and '`' not in comment:
+            #    logger.info("Discarding non-actionable review (no code snippet/anchor provided)")
+            #    return None
             
             # Optional: priority/severity/level
             priority_val = None
@@ -495,7 +502,8 @@ class GeminiClient:
                 priority=priority,
                 category=category,
                 confidence=confidence,
-                anchor_snippet=anchor_snippet
+                anchor_snippet=anchor_snippet,
+                fix_code=fix_code
             )
             
         except Exception as e:
@@ -536,60 +544,42 @@ class GeminiClient:
         
         # Determine which JSON construct appears first
         start_idx = -1
-        mode = None  # 'object' or 'array'
         if arr_start != -1 and (obj_start == -1 or arr_start < obj_start):
             start_idx = arr_start
-            mode = 'array'
         elif obj_start != -1:
             start_idx = obj_start
-            mode = 'object'
         else:
             logger.warning("No JSON object or array start found in response")
             return cleaned
         
-        # Extract the balanced JSON segment
-        end_idx = -1
-        if mode == 'object':
-            brace_count = 0
-            for i in range(start_idx, len(cleaned)):
-                ch = cleaned[i]
-                if ch == '{':
-                    brace_count += 1
-                elif ch == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        end_idx = i
-                        break
-        else:  # array
-            bracket_count = 0
-            for i in range(start_idx, len(cleaned)):
-                ch = cleaned[i]
-                if ch == '[':
-                    bracket_count += 1
-                elif ch == ']':
-                    bracket_count -= 1
-                    if bracket_count == 0:
-                        end_idx = i
-                        break
-        
-        if end_idx == -1:
-            logger.warning(f"No matching closing {'brace' if mode=='object' else 'bracket'} found for JSON {mode}")
-            return cleaned
-        
-        json_text = cleaned[start_idx:end_idx + 1]
-        
-        # Log if we had to strip conversational text
-        if start_idx > 0:
-            stripped_prefix = cleaned[:start_idx].strip()
-            if stripped_prefix:
-                logger.info(f"Stripped conversational prefix from response: {stripped_prefix[:100]}...")
-        
-        if end_idx < len(cleaned) - 1:
-            stripped_suffix = cleaned[end_idx + 1:].strip()
-            if stripped_suffix:
-                logger.info(f"Stripped conversational suffix from response: {stripped_suffix[:100]}...")
-        
-        return json_text.strip()
+        # Use JSONDecoder to robustly find the end of the JSON object
+        try:
+            # raw_decode parses from the start and returns (obj, end_index)
+            _, end_offset = json.JSONDecoder().raw_decode(cleaned[start_idx:])
+            end_idx = start_idx + end_offset
+            
+            # Log if we had to strip conversational text
+            if start_idx > 0:
+                stripped_prefix = cleaned[:start_idx].strip()
+                if stripped_prefix:
+                    logger.info(f"Stripped conversational prefix from response: {stripped_prefix[:100]}...")
+            
+            if end_idx < len(cleaned):
+                stripped_suffix = cleaned[end_idx:].strip()
+                if stripped_suffix:
+                    logger.info(f"Stripped conversational suffix from response: {stripped_suffix[:100]}...")
+            
+            return cleaned[start_idx:end_idx]
+            
+        except json.JSONDecodeError:
+            logger.warning("Failed to decode JSON segment using raw_decode, falling back to heuristic")
+            # Fallback to the old heuristic method (bracket counting) just in case, 
+            # although if JSONDecoder failed, this is likely to produce invalid JSON anyway.
+            # But maybe it helps if the JSON is slightly malformed but fixable? 
+            # Actually, if raw_decode fails, the JSON is invalid. 
+            # We'll return the substring from start_idx and hope the caller's subsequent try/catch handles it
+            # or maybe _extract_valid_json_segment (called later) does a better job.
+            return cleaned[start_idx:]
 
     def _extract_valid_json_segment(self, text: str) -> Optional[str]:
         """Attempt to extract a valid JSON object or array that contains reviews from free-form text.

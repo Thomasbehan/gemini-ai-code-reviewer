@@ -136,6 +136,20 @@ class CommentProcessor:
             if position < 1 or position > len(hunk.lines):
                 return None
 
+            # Format the body with fix code if available
+            body = ai_response.review_comment
+            fix_code = getattr(ai_response, 'fix_code', None)
+            
+            if fix_code:
+                # simple language detection from extension
+                lang = diff_file.file_info.file_extension
+                if lang and lang.startswith('.'):
+                    lang = lang[1:]
+                if not lang:
+                    lang = ""
+                
+                body += f"\n\n```{lang}\n{fix_code}\n```"
+
             # Compute global diff position (across all hunks in this file)
             # GitHub expects 'position' to be the index within the file's entire patch
             try:
@@ -186,12 +200,13 @@ class CommentProcessor:
                 file_line_number = position
 
             comment = ReviewComment(
-                body=ai_response.review_comment,
+                body=body,
                 path=diff_file.file_info.path,
                 position=file_patch_position,
                 line_number=file_line_number,
                 priority=ai_response.priority,
-                category=ai_response.category
+                category=ai_response.category,
+                suggestion=getattr(ai_response, 'fix_code', None)
             )
             return comment
 

@@ -126,6 +126,7 @@ class AIResponse:
     category: Optional[str] = None
     confidence: Optional[float] = None
     anchor_snippet: Optional[str] = None
+    fix_code: Optional[str] = None
 
 
 @dataclass
