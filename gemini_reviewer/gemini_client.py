@@ -572,13 +572,8 @@ class GeminiClient:
             return cleaned[start_idx:end_idx]
             
         except json.JSONDecodeError:
-            logger.warning("Failed to decode JSON segment using raw_decode, falling back to heuristic")
-            # Fallback to the old heuristic method (bracket counting) just in case, 
-            # although if JSONDecoder failed, this is likely to produce invalid JSON anyway.
-            # But maybe it helps if the JSON is slightly malformed but fixable? 
-            # Actually, if raw_decode fails, the JSON is invalid. 
-            # We'll return the substring from start_idx and hope the caller's subsequent try/catch handles it
-            # or maybe _extract_valid_json_segment (called later) does a better job.
+            logger.warning("Failed to decode JSON segment using raw_decode, falling back to heuristic extraction")
+            # Return the substring from start_idx so fallback methods can try to handle it
             return cleaned[start_idx:]
 
     def _extract_valid_json_segment(self, text: str) -> Optional[str]:
@@ -587,6 +582,7 @@ class GeminiClient:
         1) Prefer fenced ```json code blocks (object or array)
         2) Otherwise, collect all balanced array '[' ']' and object '{' '}' segments and
            try to parse them, prioritizing arrays and dicts that look like reviews.
+        3) If all else fails (e.g. truncated JSON), try to recover by extracting valid objects.
         """
         if not text:
             return None
@@ -620,28 +616,150 @@ class GeminiClient:
         # Prefer arrays first, then objects
         candidates.extend(arr_segments or [])
         candidates.extend(obj_segments or [])
-        if not candidates:
-            return None
+        
+        if candidates:
+            # Sort candidates: prefer those containing 'reviews' or review-like keys, then longer
+            def looks_reviewish(seg: str) -> bool:
+                keywords = ["\"reviews\"", "\"line\"", "\"lineNumber\"", "\"comment\"", "\"message\""]
+                return any(k in seg for k in keywords)
+            
+            candidates.sort(key=lambda s: (not looks_reviewish(s), -len(s)))
 
-        # Sort candidates: prefer those containing 'reviews' or review-like keys, then longer
-        def looks_reviewish(seg: str) -> bool:
-            keywords = ["\"reviews\"", "\"line\"", "\"lineNumber\"", "\"comment\"", "\"message\""]
-            return any(k in seg for k in keywords)
-        candidates.sort(key=lambda s: (not looks_reviewish(s), -len(s)))
-
-        for seg in candidates:
-            try:
-                data = json.loads(seg)
-                if isinstance(data, list):
-                    if data and isinstance(data[0], dict):
+            for seg in candidates:
+                try:
+                    data = json.loads(seg)
+                    if isinstance(data, list):
+                        if data and isinstance(data[0], dict):
+                            return seg
+                    elif isinstance(data, dict):
+                        # Accept any dict; downstream will normalize single-item dicts too
                         return seg
-                elif isinstance(data, dict):
-                    # Accept any dict; downstream will normalize single-item dicts too
-                    return seg
-            except Exception:
-                continue
+                except Exception:
+                    continue
+
+        # 3) Fallback: Try to recover from truncated response
+        # If we reached here, it means we couldn't parse a complete valid JSON structure.
+        # This often happens if the response was truncated (max tokens).
+        logger.info("No valid JSON found by standard methods, attempting to recover from truncated response...")
+        
+        # First try to recover complete objects from the list
+        recovered = self._recover_json_list_from_objects(raw)
+        if recovered:
+             logger.info("Successfully recovered JSON list from truncated response")
+             return recovered
+
+        # 4) Fallback: Try to repair the truncated JSON string directly
+        # This handles the case where the last object itself is truncated
+        logger.info("Attempting to repair truncated JSON string...")
+        repaired = self._repair_truncated_json(raw)
+        try:
+            data = json.loads(repaired)
+            # Basic validation
+            if isinstance(data, (dict, list)):
+                logger.info("Successfully repaired truncated JSON")
+                return repaired
+        except Exception:
+            pass
 
         return None
+
+    def _extract_json_objects(self, text: str) -> List[str]:
+        """Find valid JSON objects in text, handling nested braces and strings correctly."""
+        objects = []
+        stack = []
+        in_string = False
+        escape = False
+        
+        for i, char in enumerate(text):
+            if escape:
+                escape = False
+                continue
+            if char == '\\':
+                escape = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+                
+            if char == '{':
+                stack.append(i)
+            elif char == '}':
+                if stack:
+                    start = stack.pop()
+                    if not stack: # Top level object closed
+                        objects.append(text[start:i+1])
+        return objects
+
+    def _recover_json_list_from_objects(self, text: str) -> Optional[str]:
+        """Attempt to recover a list of review objects from text that might be a truncated JSON array."""
+        objects = self._extract_json_objects(text)
+        if not objects:
+            return None
+            
+        # Filter objects that look like reviews
+        valid_reviews = []
+        # Keywords common in Review object
+        keywords = ['"reviewComment"', '"lineNumber"', '"priority"', '"category"']
+        
+        for obj_str in objects:
+            # Check if it parses as valid JSON
+            try:
+                # We also verify it has at least one review keyword to avoid picking up garbage
+                if any(k in obj_str for k in keywords):
+                    # Parse to double check validity
+                    json.loads(obj_str)
+                    valid_reviews.append(obj_str)
+            except Exception:
+                continue
+        
+        if not valid_reviews:
+            return None
+            
+        # Construct a new JSON array
+        return "[" + ",".join(valid_reviews) + "]"
+
+    def _repair_truncated_json(self, text: str) -> str:
+        """Attempt to repair a truncated JSON string by closing open strings and brackets/braces."""
+        stack = []
+        in_string = False
+        escape = False
+        
+        for char in text:
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == '\\':
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            
+            # Not in string
+            if char == '"':
+                in_string = True
+            elif char == '{':
+                stack.append('}')
+            elif char == '[':
+                stack.append(']')
+            elif char == '}' or char == ']':
+                if stack:
+                    # Ideally the character should match stack[-1]
+                    # If not, the JSON is likely malformed, but we proceed
+                    if stack[-1] == char:
+                        stack.pop()
+
+        # Construct repaired string
+        repaired = text
+        if in_string:
+            repaired += '"'
+            
+        # Close everything remaining on stack in reverse order
+        while stack:
+            repaired += stack.pop()
+            
+        return repaired
 
     def _collect_balanced_brace_segments(self, text: str) -> List[str]:
         """Collect all top-level balanced brace substrings from text.

@@ -9,13 +9,13 @@ from gemini_reviewer.prompts import ReviewMode
 def test_get_env_str_with_and_without_fallback(monkeypatch):
     monkeypatch.delenv("PRIMARY_KEY", raising=False)
     monkeypatch.delenv("FALLBACK1", raising=False)
-    assert E.get_env_str("PRIMARY_KEY", default="x", *("FALLBACK1",)) == "x"
+    assert E.get_env_str("PRIMARY_KEY", "x", "FALLBACK1") == "x"
 
     monkeypatch.setenv("FALLBACK1", "fb")
-    assert E.get_env_str("PRIMARY_KEY", default="x", *("FALLBACK1",)) == "fb"
+    assert E.get_env_str("PRIMARY_KEY", "x", "FALLBACK1") == "fb"
 
     monkeypatch.setenv("PRIMARY_KEY", "main")
-    assert E.get_env_str("PRIMARY_KEY", default="x", *("FALLBACK1",)) == "main"
+    assert E.get_env_str("PRIMARY_KEY", "x", "FALLBACK1") == "main"
 
 
 def test_get_env_int_success_and_failure(monkeypatch):
