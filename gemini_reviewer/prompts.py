@@ -42,6 +42,7 @@ STRICT OUTPUT RULES:
 - No markdown fences around JSON. No conversational text.
 - 'fixCode' must contain valid code replacement.
 - 'explanation' must be concise and actionable.
+  State briefly WHY this is a problem and HOW the fix resolves it.
 
 SCOPE: Report ONLY issues that must be fixed (critical/serious):
 - Bugs & Logic Errors
@@ -49,18 +50,32 @@ SCOPE: Report ONLY issues that must be fixed (critical/serious):
 - Performance Problems
 - Error Handling failures
 - Resource Management (leaks/unclosed handles)
-- Poor Variable/Function Naming that severely impacts readability:
-  * Non-descriptive single-letter names (except standard loop counters i, j, k)
-  * Cryptic abbreviations that obscure meaning
-  * Misleading names that don't match their purpose
-  * Inconsistent naming conventions within the same scope
+- Poor Variable/Function/Class Naming that severely impacts readability:
+  Zero‑shorthand naming policy is enforced across this repository.
+  Treat violations as critical readability issues when they harm clarity.
+  Disallow non-descriptive or abbreviated identifiers. Examples:
+  - Not allowed: s, svc, srv, cfg, conf, req, resp, usr, repo, mgr, util, lst, dt
+  - Prefer full, descriptive words: service, service_client, config, request, response,
+    user, repository, manager, utilities, items, date_time
+  - Single-letter loop indices (i, j, k) are acceptable ONLY for tight loops; for anything
+    outside simple indices, prefer descriptive names.
+  - Coordinate/math conventions (x, y) are acceptable when contextually appropriate.
+  - Names must match purpose and be consistent within the same scope.
 - Serious Code Quality / Best Practice violations that impact correctness, security, or performance
 
 ANCHORING:
 - You review ONE diff hunk at a time; lineNumber is 1-based within this hunk.
-- Prefer '+' lines; use nearby context ' ' lines only if necessary (±3 lines).
-- Never target '-' lines unless removal itself introduces a problem.
+- Prefer '+' (added) lines; use nearby context ' ' lines only if necessary (±3 lines).
+- Never target '-' (removed) lines unless the act of removal introduces a problem.
+- Do NOT suggest re-adding code that was intentionally removed unless you can show
+  a concrete breakage (e.g., API contract violation, missing required behavior, clear bug).
 - anchorSnippet must be copied verbatim from the chosen target line (without diff prefix). If you cannot anchor confidently, omit the item.
+
+CONTEXT AWARENESS:
+- Use any provided repository/project context to understand how this hunk integrates
+  with the rest of the codebase. Prefer fixes that align with existing patterns and APIs.
+- If functionality was moved or simplified by deletions, treat that as a potential improvement,
+  not a regression, unless you can demonstrate a specific problem introduced by the change.
 
 REVIEW RULES:
 - Be precise and actionable. If uncertain, omit.
@@ -78,6 +93,8 @@ NOISE_CONTROL = """
 - Prefer the single most impactful fix over multiple minor suggestions.
 - Do not chain follow-up recommendations created by your own suggestion.
 - If no material issues remain, respond exactly with {"reviews": []}.
+- Do not recommend reintroducing code that the diff removes unless removal breaks
+  existing behavior or violates a public contract validated by surrounding context.
 """
 
 # Mode-specific instructions
@@ -136,6 +153,7 @@ CRITICAL RULES FOR FOLLOW-UP REVIEW:
 6. Do NOT comment on code that wasn't mentioned in previous comments.
 7. ONLY focus on verifying the resolution of the specific issues mentioned in previous comments.
 8. IMPORTANT: Fixes that remove problematic code count as valid resolutions. If the fix consists of deleting the previously problematic code (e.g., removing a try/except around lock.acquire()), treat the '-' deletion lines in the diff as evidence of resolution.
+9. Do NOT recommend re-adding removed code in follow-up mode. If the prior issue is resolved by deletion and no new breakage is introduced, consider it resolved.
 
 PREVIOUS COMMENTS TO VERIFY:
 {previous_comments}
