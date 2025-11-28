@@ -159,8 +159,9 @@ class CommentProcessor:
                         if idx < hunk_index and hasattr(h, 'lines'):
                             # Each previous hunk contributes its header line ('@@ ... @@') plus its lines
                             prior_hunks_total += (1 + len(h.lines))
-                # Add 1 for the current hunk header, then add the line index within the hunk
-                file_patch_position = prior_hunks_total + 1 + position
+                # Add 1 for the current hunk header, then add the 0-based line offset within the hunk
+                # (position is 1-based, so subtract 1 to get the correct offset)
+                file_patch_position = prior_hunks_total + 1 + (position - 1)
             except Exception:
                 # Fallback to hunk-local position if anything goes wrong
                 file_patch_position = position
