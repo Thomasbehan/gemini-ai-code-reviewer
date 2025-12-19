@@ -9,7 +9,7 @@ import logging
 import os
 import re
 import ast
-from typing import List, Optional, Dict, Set
+from typing import List, Optional, Dict, Set, Any
 from pathlib import Path
 
 from .models import DiffFile, PRDetails
@@ -31,61 +31,170 @@ class ContextBuilder:
         self.diff_parser = diff_parser
     
     async def detect_related_files(self, diff_file: DiffFile, pr_details: PRDetails) -> List[str]:
-        """Detect related files based on imports and dependencies.
-        
+        """Detect related files based on imports, dependencies, and inheritance.
+
+        Analyzes the FULL file content (not just hunks) to find all dependencies.
+
         Args:
             diff_file: The diff file to analyze
             pr_details: Pull request details
-            
+
         Returns:
-            List of related file paths (limited to 5 most relevant)
+            List of related file paths (limited to 10 most relevant)
         """
         file_path = diff_file.file_info.path
         related_files = []
-        
+        seen_imports = set()
+
         try:
-            # Extract imports/requires/includes from the file content
+            # Get the FULL file content, not just the diff hunks
+            full_content = None
+            try:
+                full_content = self.github_client.get_file_content(
+                    pr_details.owner, pr_details.repo, file_path, pr_details.head_sha or 'HEAD'
+                )
+            except Exception as e:
+                logger.debug(f"Could not fetch full file content for {file_path}: {e}")
+
+            # Fall back to reading from local filesystem if GitHub fetch fails
+            if not full_content:
+                try:
+                    local_path = os.path.join(os.getcwd(), file_path)
+                    if os.path.exists(local_path):
+                        with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            full_content = f.read()
+                except Exception:
+                    pass
+
+            # If still no content, fall back to hunk content
+            if not full_content:
+                full_content = "\n".join(
+                    line[1:] if line and line[0] in '+ ' else line
+                    for hunk in diff_file.hunks
+                    for line in hunk.lines
+                    if not line.startswith('-')
+                )
+
+            # Import patterns for various languages
             import_patterns = {
-                'python': [r'from\s+(\S+)\s+import', r'import\s+(\S+)'],
-                'javascript': [r'import\s+.*\s+from\s+["\']([^"\']+)["\']', r'require\(["\']([^"\']+)["\']\)'],
-                'typescript': [r'import\s+.*\s+from\s+["\']([^"\']+)["\']', r'require\(["\']([^"\']+)["\']\)'],
+                'python': [
+                    r'from\s+([\w.]+)\s+import',
+                    r'import\s+([\w.]+)',
+                    # Dynamic imports
+                    r'importlib\.import_module\(["\']([^"\']+)["\']\)',
+                    r'__import__\(["\']([^"\']+)["\']\)',
+                ],
+                'javascript': [
+                    r'import\s+.*\s+from\s+["\']([^"\']+)["\']',
+                    r'import\s+["\']([^"\']+)["\']',
+                    r'require\(["\']([^"\']+)["\']\)',
+                    r'import\(["\']([^"\']+)["\']\)',  # Dynamic imports
+                ],
+                'typescript': [
+                    r'import\s+.*\s+from\s+["\']([^"\']+)["\']',
+                    r'import\s+["\']([^"\']+)["\']',
+                    r'require\(["\']([^"\']+)["\']\)',
+                    r'import\(["\']([^"\']+)["\']\)',
+                ],
                 'java': [r'import\s+([^;]+);'],
-                'go': [r'import\s+["\']([^"\']+)["\']', r'import\s+\(\s*["\']([^"\']+)["\']'],
-                'ruby': [r'require\s+["\']([^"\']+)["\']'],
+                'go': [
+                    r'import\s+["\']([^"\']+)["\']',
+                    r'import\s+\w+\s+["\']([^"\']+)["\']',  # Named imports
+                    r'import\s+\(\s*(?:[^)]*\s)?["\']([^"\']+)["\']',
+                ],
+                'ruby': [
+                    r'require\s+["\']([^"\']+)["\']',
+                    r'require_relative\s+["\']([^"\']+)["\']',
+                    r'load\s+["\']([^"\']+)["\']',
+                ],
             }
-            
+
             language = self.diff_parser.get_file_language(file_path)
-            
+
             if language and language.lower() in import_patterns:
                 patterns = import_patterns[language.lower()]
-                
-                # Analyze the hunk content for imports
-                for hunk in diff_file.hunks:
-                    for line in hunk.lines:
-                        # Only look at added or context lines, not deleted lines
-                        if line.startswith('-'):
+
+                for pattern in patterns:
+                    matches = re.findall(pattern, full_content)
+                    for match in matches:
+                        if match in seen_imports:
                             continue
-                        
-                        clean_line = line[1:] if line else line  # Remove +/- prefix
-                        
-                        for pattern in patterns:
-                            matches = re.findall(pattern, clean_line)
-                            for match in matches:
-                                # Convert import path to file path
-                                related_file = self._import_to_file_path(match, file_path, language)
-                                if related_file and related_file not in related_files:
-                                    related_files.append(related_file)
-            
-            # Limit to most relevant files to avoid token bloat
-            related_files = related_files[:5]
-            
+                        seen_imports.add(match)
+
+                        # Convert import path to file path
+                        related_file = self._import_to_file_path(match, file_path, language)
+                        if related_file and related_file not in related_files:
+                            related_files.append(related_file)
+
+            # For Python, also detect class inheritance and type annotations
+            if language and language.lower() == 'python':
+                try:
+                    tree = ast.parse(full_content)
+                    for node in ast.walk(tree):
+                        # Class inheritance
+                        if isinstance(node, ast.ClassDef):
+                            for base in node.bases:
+                                if isinstance(base, ast.Attribute):
+                                    # module.ClassName
+                                    if isinstance(base.value, ast.Name):
+                                        module_name = base.value.id
+                                        if module_name not in seen_imports:
+                                            seen_imports.add(module_name)
+                                            rel = self._import_to_file_path(module_name, file_path, 'python')
+                                            if rel and rel not in related_files:
+                                                related_files.append(rel)
+
+                        # Type annotations in function signatures
+                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                            # Check return annotation
+                            if node.returns:
+                                self._extract_type_refs(node.returns, seen_imports, related_files, file_path)
+                            # Check parameter annotations
+                            for arg in node.args.args + node.args.kwonlyargs:
+                                if arg.annotation:
+                                    self._extract_type_refs(arg.annotation, seen_imports, related_files, file_path)
+                except SyntaxError:
+                    pass  # File might have syntax errors
+                except Exception as e:
+                    logger.debug(f"Error parsing Python AST for {file_path}: {e}")
+
+            # Limit to most relevant files
+            related_files = related_files[:10]
+
             if related_files:
                 logger.info(f"Detected {len(related_files)} related files for {file_path}")
-            
+
         except Exception as e:
             logger.debug(f"Error detecting related files for {file_path}: {str(e)}")
-        
+
         return related_files
+
+    def _extract_type_refs(self, annotation, seen_imports: Set[str], related_files: List[str], current_file: str):
+        """Extract type references from annotations for dependency detection."""
+        try:
+            if isinstance(annotation, ast.Name):
+                # Simple type like 'MyClass'
+                type_name = annotation.id
+                if type_name not in seen_imports and type_name not in {'str', 'int', 'float', 'bool', 'None', 'Any', 'List', 'Dict', 'Optional', 'Tuple', 'Set'}:
+                    seen_imports.add(type_name)
+            elif isinstance(annotation, ast.Attribute):
+                # Qualified type like 'module.MyClass'
+                if isinstance(annotation.value, ast.Name):
+                    module_name = annotation.value.id
+                    if module_name not in seen_imports:
+                        seen_imports.add(module_name)
+                        rel = self._import_to_file_path(module_name, current_file, 'python')
+                        if rel and rel not in related_files:
+                            related_files.append(rel)
+            elif isinstance(annotation, ast.Subscript):
+                # Generic types like List[MyClass] or Dict[str, MyClass]
+                self._extract_type_refs(annotation.slice, seen_imports, related_files, current_file)
+            elif isinstance(annotation, ast.Tuple):
+                # Multiple types in a tuple
+                for elt in annotation.elts:
+                    self._extract_type_refs(elt, seen_imports, related_files, current_file)
+        except Exception:
+            pass
     
     def _import_to_file_path(self, import_path: str, current_file: str, language: str) -> Optional[str]:
         """Convert an import path to a file path.
@@ -273,12 +382,301 @@ class ContextBuilder:
             logger.info(f"Found {len(reverse_deps)} reverse dependencies for {changed_file}")
         except Exception as e:
             logger.debug(f"Error finding reverse dependencies: {str(e)}")
-        
+
         return reverse_deps
-    
+
+    def _find_function_callers(self, changed_file: str, diff_content: str) -> List[Dict[str, Any]]:
+        """Find code that calls functions being modified in this diff.
+
+        Args:
+            changed_file: Path to the changed file
+            diff_content: The diff content to analyze for changed functions
+
+        Returns:
+            List of dicts with caller info: {file, function_name, calling_code}
+        """
+        callers = []
+        try:
+            repo_root = os.getcwd()
+
+            # Extract function names that are being added/modified in the diff
+            changed_functions = set()
+            for line in diff_content.split('\n'):
+                if line.startswith('+') and not line.startswith('+++'):
+                    clean_line = line[1:].strip()
+                    # Python function definitions
+                    if clean_line.startswith('def ') or clean_line.startswith('async def '):
+                        func_name = clean_line.split('(')[0].replace('def ', '').replace('async ', '').strip()
+                        if func_name:
+                            changed_functions.add(func_name)
+                    # JavaScript/TypeScript functions
+                    match = re.search(r'function\s+(\w+)', clean_line)
+                    if match:
+                        changed_functions.add(match.group(1))
+                    # Arrow functions assigned to const
+                    match = re.search(r'const\s+(\w+)\s*=', clean_line)
+                    if match and '=>' in clean_line:
+                        changed_functions.add(match.group(1))
+
+            if not changed_functions:
+                return []
+
+            logger.debug(f"Looking for callers of functions: {changed_functions}")
+
+            # Search for callers across the codebase
+            code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
+            exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'build', 'dist'}
+
+            for root, dirs, files in os.walk(repo_root):
+                dirs[:] = [d for d in dirs if d not in exclude_dirs]
+
+                for filename in files:
+                    file_ext = os.path.splitext(filename)[1]
+                    if file_ext not in code_extensions:
+                        continue
+
+                    file_path = os.path.join(root, filename)
+                    rel_path = os.path.relpath(file_path, repo_root)
+
+                    # Skip the changed file itself
+                    if rel_path == changed_file:
+                        continue
+
+                    try:
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read()
+                            lines = content.split('\n')
+
+                        for func_name in changed_functions:
+                            # Pattern to find function calls (not definitions)
+                            call_pattern = rf'(?<!def\s)(?<!function\s)\b{re.escape(func_name)}\s*\('
+
+                            for i, line in enumerate(lines):
+                                if re.search(call_pattern, line):
+                                    # Get context around the call (3 lines before and after)
+                                    start = max(0, i - 3)
+                                    end = min(len(lines), i + 4)
+                                    context_lines = lines[start:end]
+
+                                    callers.append({
+                                        'file': rel_path,
+                                        'function_name': func_name,
+                                        'line_number': i + 1,
+                                        'calling_code': '\n'.join(context_lines)
+                                    })
+
+                                    if len(callers) >= 15:  # Limit total callers
+                                        break
+
+                        if len(callers) >= 15:
+                            break
+
+                    except Exception:
+                        continue
+
+                if len(callers) >= 15:
+                    break
+
+            if callers:
+                logger.info(f"Found {len(callers)} callers for changed functions in {changed_file}")
+
+        except Exception as e:
+            logger.debug(f"Error finding function callers: {str(e)}")
+
+        return callers
+
+    def _find_called_functions(self, file_content: str, file_path: str) -> List[Dict[str, Any]]:
+        """Find definitions of functions that are called in the given file.
+
+        Args:
+            file_content: Content of the file being reviewed
+            file_path: Path to the file
+
+        Returns:
+            List of dicts with called function info
+        """
+        called_functions = []
+        try:
+            repo_root = os.getcwd()
+
+            # For Python files, use AST to find function calls
+            if file_path.endswith('.py'):
+                try:
+                    tree = ast.parse(file_content)
+                    function_calls = set()
+
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Call):
+                            if isinstance(node.func, ast.Name):
+                                function_calls.add(node.func.id)
+                            elif isinstance(node.func, ast.Attribute):
+                                function_calls.add(node.func.attr)
+
+                    # Now search for definitions of these functions
+                    code_extensions = {'.py'}
+                    exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'build', 'dist'}
+
+                    for root, dirs, files in os.walk(repo_root):
+                        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+
+                        for filename in files:
+                            if not filename.endswith('.py'):
+                                continue
+
+                            search_path = os.path.join(root, filename)
+                            rel_path = os.path.relpath(search_path, repo_root)
+
+                            if rel_path == file_path:
+                                continue
+
+                            try:
+                                with open(search_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                    search_content = f.read()
+
+                                search_tree = ast.parse(search_content)
+
+                                for node in ast.walk(search_tree):
+                                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                                        if node.name in function_calls:
+                                            # Get the function definition with a few lines of body
+                                            lines = search_content.split('\n')
+                                            start_line = node.lineno - 1
+                                            end_line = min(start_line + 15, len(lines))  # Get up to 15 lines
+                                            func_code = '\n'.join(lines[start_line:end_line])
+
+                                            called_functions.append({
+                                                'file': rel_path,
+                                                'function_name': node.name,
+                                                'definition': func_code
+                                            })
+
+                                            if len(called_functions) >= 10:
+                                                break
+
+                                if len(called_functions) >= 10:
+                                    break
+
+                            except Exception:
+                                continue
+
+                        if len(called_functions) >= 10:
+                            break
+
+                except SyntaxError:
+                    pass
+
+            if called_functions:
+                logger.info(f"Found {len(called_functions)} called function definitions for {file_path}")
+
+        except Exception as e:
+            logger.debug(f"Error finding called functions: {str(e)}")
+
+        return called_functions
+
+    def _score_related_file_relevance(self, related_file: str, changed_file: str, diff_content: str) -> float:
+        """Score how relevant a related file is to the changed file.
+
+        Higher scores mean more relevant. Used for prioritizing which context to include.
+
+        Args:
+            related_file: Path to a potentially related file
+            changed_file: Path to the file being changed
+            diff_content: The diff content being reviewed
+
+        Returns:
+            Relevance score (0.0 to 1.0)
+        """
+        score = 0.0
+
+        try:
+            # Same directory = higher relevance
+            if os.path.dirname(related_file) == os.path.dirname(changed_file):
+                score += 0.3
+
+            # Same package/module prefix = moderate relevance
+            changed_parts = changed_file.replace('\\', '/').split('/')
+            related_parts = related_file.replace('\\', '/').split('/')
+            common_prefix = 0
+            for c, r in zip(changed_parts, related_parts):
+                if c == r:
+                    common_prefix += 1
+                else:
+                    break
+            if common_prefix > 0:
+                score += min(0.2, common_prefix * 0.05)
+
+            # File is mentioned in the diff = very high relevance
+            related_name = os.path.basename(related_file).rsplit('.', 1)[0]
+            if related_name in diff_content:
+                score += 0.4
+
+            # Related file is a utility/helper (lower priority)
+            if any(kw in related_file.lower() for kw in ['util', 'helper', 'common', 'base']):
+                score -= 0.1
+
+            # Test files have lower priority for production code context
+            if any(kw in related_file.lower() for kw in ['test', 'spec', 'mock']):
+                score -= 0.15
+
+            # Config files are useful
+            if any(kw in related_file.lower() for kw in ['config', 'settings', 'constants']):
+                score += 0.1
+
+            # Same file extension = slightly more relevant
+            if os.path.splitext(related_file)[1] == os.path.splitext(changed_file)[1]:
+                score += 0.05
+
+        except Exception:
+            pass
+
+        return max(0.0, min(1.0, score))
+
+    def _prioritize_context_sections(
+        self,
+        sections: List[Dict[str, Any]],
+        max_size: int
+    ) -> List[str]:
+        """Prioritize and select context sections to fit within budget.
+
+        Args:
+            sections: List of dicts with 'content', 'priority', 'name'
+            max_size: Maximum total character budget
+
+        Returns:
+            List of selected content strings in priority order
+        """
+        # Sort by priority (higher first)
+        sorted_sections = sorted(sections, key=lambda x: x.get('priority', 0), reverse=True)
+
+        selected = []
+        current_size = 0
+
+        for section in sorted_sections:
+            content = section.get('content', '')
+            if not content:
+                continue
+
+            content_size = len(content)
+
+            # If this section fits, include it
+            if current_size + content_size <= max_size:
+                selected.append(content)
+                current_size += content_size
+            else:
+                # Try to include a truncated version if it's high priority
+                if section.get('priority', 0) >= 0.8:
+                    remaining = max_size - current_size
+                    if remaining > 500:  # Only include if we have meaningful space
+                        truncated = content[:remaining - 50] + "\n... (truncated due to space)"
+                        selected.append(truncated)
+                        current_size += len(truncated)
+                        break  # No more space after this
+
+        return selected
+
     def _find_test_files(self, changed_file: str) -> List[str]:
         """Find test files related to the changed file.
-        
+
         Args:
             changed_file: Path to the changed file
             
@@ -566,31 +964,88 @@ class ContextBuilder:
             code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
             
             def extract_python_signatures(file_path: str, rel_path: str) -> List[str]:
-                """Extract signatures from Python files."""
+                """Extract signatures from Python files with full type annotations."""
                 sigs = []
                 try:
                     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
-                    
+
                     tree = ast.parse(content)
-                    
-                    for node in ast.walk(tree):
+
+                    def format_annotation(ann) -> str:
+                        """Format an AST annotation node to string."""
+                        if ann is None:
+                            return ""
+                        try:
+                            return ast.unparse(ann)
+                        except Exception:
+                            # Fallback for older Python versions
+                            if isinstance(ann, ast.Name):
+                                return ann.id
+                            elif isinstance(ann, ast.Constant):
+                                return repr(ann.value)
+                            elif isinstance(ann, ast.Subscript):
+                                return f"{format_annotation(ann.value)}[...]"
+                            return "?"
+
+                    def format_function_signature(node) -> str:
+                        """Format a function/method with full signature."""
+                        params = []
+                        all_args = node.args.args + node.args.kwonlyargs
+
+                        for arg in all_args[:6]:  # Limit params shown
+                            param_str = arg.arg
+                            if arg.annotation:
+                                type_str = format_annotation(arg.annotation)
+                                param_str = f"{arg.arg}: {type_str}"
+                            params.append(param_str)
+
+                        if len(all_args) > 6:
+                            params.append("...")
+
+                        params_str = ", ".join(params)
+                        return_type = ""
+                        if node.returns:
+                            return_type = f" -> {format_annotation(node.returns)}"
+
+                        prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
+                        return f"  {prefix} {node.name}({params_str}){return_type}"
+
+                    # Process top-level nodes
+                    for node in ast.iter_child_nodes(tree):
                         if isinstance(node, ast.ClassDef):
-                            # Get class with methods
-                            methods = [m.name for m in node.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
-                            if methods:
-                                sigs.append(f"  class {node.name}: {', '.join(methods[:5])}")
-                            else:
-                                sigs.append(f"  class {node.name}")
+                            # Get base classes
+                            bases = []
+                            for base in node.bases[:3]:
+                                bases.append(format_annotation(base))
+                            base_str = f"({', '.join(bases)})" if bases else ""
+
+                            # Get methods with their signatures
+                            methods = []
+                            for item in node.body:
+                                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                                    # Format method signature compactly
+                                    method_params = []
+                                    for arg in item.args.args[1:4]:  # Skip 'self', limit to 3
+                                        if arg.annotation:
+                                            method_params.append(f"{arg.arg}: {format_annotation(arg.annotation)}")
+                                        else:
+                                            method_params.append(arg.arg)
+                                    ret = f" -> {format_annotation(item.returns)}" if item.returns else ""
+                                    methods.append(f"{item.name}({', '.join(method_params)}){ret}")
+
+                            sigs.append(f"  class {node.name}{base_str}:")
+                            for method in methods[:8]:  # Limit methods per class
+                                sigs.append(f"    {method}")
+
                         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                            # Only top-level functions (not methods)
-                            if node.col_offset == 0:
-                                params = [arg.arg for arg in node.args.args]
-                                sigs.append(f"  def {node.name}({', '.join(params[:3])}{'...' if len(params) > 3 else ''})")
-                    
+                            sigs.append(format_function_signature(node))
+
+                except SyntaxError:
+                    pass  # File has syntax errors
                 except Exception:
                     pass
-                
+
                 return sigs
             
             def extract_generic_signatures(file_path: str, rel_path: str) -> List[str]:
@@ -682,7 +1137,7 @@ class ContextBuilder:
             Formatted project context string or None if no context available
         """
         context_parts = []
-        max_context_size = 30000  # Increased limit to accommodate enhanced context layers
+        max_context_size = 60000  # Increased limit for comprehensive context
         current_size = 0
         
         try:
@@ -753,36 +1208,114 @@ class ContextBuilder:
                         limit=30
                     )
                     if prev:
-                        # Keep this small; it helps verify resolutions
+                        # Previous comments help verify resolutions
                         snippet = prev
-                        if len(snippet) > 2000:
-                            snippet = snippet[:2000] + "\n... (truncated)"
+                        if len(snippet) > 4000:
+                            snippet = snippet[:4000] + "\n... (truncated)"
                         context_parts.append(f"### Previous review history for {diff_file.file_info.path}\n{snippet}\n")
                         current_size += len(snippet)
                 except Exception:
                     pass
             
-            # STEP 6: Forward dependencies (related files content)
-            for related_file in related_files or []:
-                if current_size >= max_context_size:
-                    break
-                
-                # Try to fetch the file content from the base branch
-                content = self.github_client.get_file_content(
-                    pr_details.owner,
-                    pr_details.repo,
-                    related_file,
-                    pr_details.base_sha or 'main'
+            # STEP 6: Forward dependencies (related files content) - prioritized by relevance
+            if related_files:
+                # Build diff content for scoring
+                diff_content = "\n".join(
+                    line for hunk in diff_file.hunks for line in hunk.lines
                 )
-                
-                if content:
-                    # Limit individual file size
-                    if len(content) > 2000:
-                        content = content[:2000] + "\n... (truncated)"
-                    
-                    context_parts.append(f"### Related file (forward dependency): {related_file}\n```\n{content}\n```\n")
-                    current_size += len(content)
-            
+
+                # Score and sort related files by relevance
+                scored_files = []
+                for related_file in related_files:
+                    score = self._score_related_file_relevance(
+                        related_file, diff_file.file_info.path, diff_content
+                    )
+                    scored_files.append((related_file, score))
+
+                # Sort by score descending (most relevant first)
+                scored_files.sort(key=lambda x: x[1], reverse=True)
+                logger.debug(f"Prioritized related files: {[(f, f'{s:.2f}') for f, s in scored_files[:5]]}")
+
+                for related_file, score in scored_files:
+                    if current_size >= max_context_size:
+                        break
+
+                    # Try to fetch the file content from the base branch
+                    content = self.github_client.get_file_content(
+                        pr_details.owner,
+                        pr_details.repo,
+                        related_file,
+                        pr_details.base_sha or 'main'
+                    )
+
+                    if content:
+                        # Allocate more space to higher relevance files
+                        if score >= 0.5:
+                            max_file_size = 10000
+                        elif score >= 0.3:
+                            max_file_size = 6000
+                        else:
+                            max_file_size = 3000
+
+                        if len(content) > max_file_size:
+                            content = content[:max_file_size] + "\n... (truncated)"
+
+                        relevance_note = f" [relevance: {score:.2f}]" if score > 0 else ""
+                        context_parts.append(
+                            f"### Related file (forward dependency): {related_file}{relevance_note}\n```\n{content}\n```\n"
+                        )
+                        current_size += len(content)
+
+            # STEP 7: Find callers of functions being changed
+            if current_size < max_context_size:
+                try:
+                    # Build diff content from hunks
+                    diff_content = "\n".join(
+                        line for hunk in diff_file.hunks for line in hunk.lines
+                    )
+                    callers = self._find_function_callers(diff_file.file_info.path, diff_content)
+                    if callers:
+                        caller_parts = ["### Code That Calls Changed Functions\n"]
+                        caller_parts.append("These code snippets call functions that are being modified in this PR.\n")
+                        caller_parts.append("Changes to function signatures or behavior may affect these callers:\n")
+
+                        for caller in callers[:10]:  # Limit displayed
+                            caller_parts.append(f"\n#### {caller['file']} calls `{caller['function_name']}` (line {caller['line_number']}):")
+                            caller_parts.append(f"```\n{caller['calling_code']}\n```")
+
+                        caller_section = "\n".join(caller_parts)
+                        context_parts.append(caller_section)
+                        current_size += len(caller_section)
+                        logger.info(f"Added {len(callers)} function caller contexts ({len(caller_section)} chars)")
+                except Exception as e:
+                    logger.debug(f"Error finding function callers: {e}")
+
+            # STEP 8: Find definitions of functions being called
+            if current_size < max_context_size:
+                try:
+                    # Get full file content to analyze calls
+                    file_content = self.github_client.get_file_content(
+                        pr_details.owner, pr_details.repo,
+                        diff_file.file_info.path,
+                        pr_details.head_sha or 'HEAD'
+                    )
+                    if file_content:
+                        called_funcs = self._find_called_functions(file_content, diff_file.file_info.path)
+                        if called_funcs:
+                            called_parts = ["### Definitions of Functions Being Called\n"]
+                            called_parts.append("These are definitions of functions called in the changed file:\n")
+
+                            for func in called_funcs[:8]:  # Limit displayed
+                                called_parts.append(f"\n#### `{func['function_name']}` from {func['file']}:")
+                                called_parts.append(f"```\n{func['definition']}\n```")
+
+                            called_section = "\n".join(called_parts)
+                            context_parts.append(called_section)
+                            current_size += len(called_section)
+                            logger.info(f"Added {len(called_funcs)} called function definitions ({len(called_section)} chars)")
+                except Exception as e:
+                    logger.debug(f"Error finding called functions: {e}")
+
             if context_parts:
                 logger.info(f"Built comprehensive project context with {len(context_parts)} sections (~{current_size} chars)")
                 return "\n".join(context_parts)

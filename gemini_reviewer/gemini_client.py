@@ -194,7 +194,7 @@ class GeminiClient:
         sanitized_content = sanitize_code_content(hunk.content)
         sanitized_title = sanitize_text(context.pr_details.title)
         sanitized_description = sanitize_text(context.pr_details.description or "No description provided")
-        
+
         # Add context information
         context_info = []
         if context.file_info:
@@ -203,15 +203,15 @@ class GeminiClient:
                 language = get_file_language(context.file_info.path)
                 if language and language != 'unknown':
                     context_info.append(f"Language: {language}")
-        
+
         if context.is_test_file:
             context_info.append("Note: This is a test file")
-        
+
         if context.related_files:
             context_info.append(f"Related files detected: {', '.join(context.related_files)}")
-        
+
         context_string = "\n".join(context_info) if context_info else ""
-        
+
         # Build the complete prompt with enhanced instructions
         prompt_parts = [
             prompt_template,
@@ -235,14 +235,50 @@ class GeminiClient:
             "---",
             ""
         ]
-        
+
         if context_string:
             prompt_parts.extend([
                 "File Context:",
                 context_string,
                 ""
             ])
-        
+
+        # Add cross-file change summary if available
+        if context.change_summary:
+            prompt_parts.extend([
+                "Other Files Changed in This PR:",
+                "---",
+                context.change_summary,
+                "---",
+                "",
+                "Consider how this hunk relates to changes in other files.",
+                "Look for coordinated refactoring that spans multiple files.",
+                ""
+            ])
+
+        # Add full file content for better understanding of context
+        if context.full_file_content:
+            # Truncate if too long, but include key parts
+            full_content = context.full_file_content
+            max_file_content = 12000  # Characters
+            if len(full_content) > max_file_content:
+                # Include beginning (imports, class definitions) and truncate middle
+                full_content = full_content[:max_file_content] + "\n... (truncated, full file is larger)"
+
+            prompt_parts.extend([
+                "Full File Content (for understanding context around the diff):",
+                "```",
+                full_content,
+                "```",
+                "",
+                "Use the full file content to understand:",
+                "- What imports are available at the top of the file",
+                "- What class/function the changed code belongs to",
+                "- Other methods in the same class that might be affected",
+                "- The overall structure and patterns used in this file",
+                ""
+            ])
+
         # Add project context if available (related file contents)
         if context.project_context:
             prompt_parts.extend([
@@ -259,14 +295,14 @@ class GeminiClient:
                 "- Type mismatches or contract violations",
                 ""
             ])
-        
+
         prompt_parts.extend([
             "Git diff to review:",
             "```diff",
             sanitized_content,
             "```"
         ])
-        
+
         return "\n".join(prompt_parts)
     
     def _parse_ai_response(self, response_text: str) -> List[AIResponse]:

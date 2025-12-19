@@ -166,7 +166,10 @@ class AnalysisContext:
     related_files: List[str] = field(default_factory=list)
     project_context: Optional[str] = None
     language: Optional[str] = None
-    
+    full_file_content: Optional[str] = None  # Full content of the file being reviewed
+    all_changed_files: List[str] = field(default_factory=list)  # All files changed in PR
+    change_summary: Optional[str] = None  # Summary of all changes in PR
+
     @property
     def is_test_file(self) -> bool:
         """Check if this is a test file."""

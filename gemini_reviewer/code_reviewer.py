@@ -298,7 +298,7 @@ class CodeReviewer:
                 pass
             
             try:
-                file_comments = await self._analyze_single_file(diff_file, pr_details)
+                file_comments = await self._analyze_single_file(diff_file, pr_details, unique_files)
                 all_comments.extend(file_comments)
                 self.stats.files_processed += 1
 
@@ -359,9 +359,9 @@ class CodeReviewer:
         max_workers = min(self.config.performance.max_concurrent_files, len(unique_files))
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit one task per unique file
+            # Submit one task per unique file, passing all files for cross-file awareness
             future_to_file = {
-                executor.submit(self._analyze_single_file_sync, diff_file, pr_details): diff_file
+                executor.submit(self._analyze_single_file_sync, diff_file, pr_details, unique_files): diff_file
                 for diff_file in unique_files
             }
             
@@ -409,29 +409,68 @@ class CodeReviewer:
         logger.info(f"Concurrent analysis completed: {len(all_comments)} total comments")
         return all_comments
     
-    def _analyze_single_file_sync(self, diff_file: DiffFile, pr_details: PRDetails) -> List[ReviewComment]:
+    def _analyze_single_file_sync(
+        self,
+        diff_file: DiffFile,
+        pr_details: PRDetails,
+        all_diff_files: Optional[List[DiffFile]] = None
+    ) -> List[ReviewComment]:
         """Synchronous wrapper for analyzing a single file (for thread pool)."""
-        return asyncio.run(self._analyze_single_file(diff_file, pr_details))
+        return asyncio.run(self._analyze_single_file(diff_file, pr_details, all_diff_files))
     
-    async def _analyze_single_file(self, diff_file: DiffFile, pr_details: PRDetails) -> List[ReviewComment]:
+    async def _analyze_single_file(
+        self,
+        diff_file: DiffFile,
+        pr_details: PRDetails,
+        all_diff_files: Optional[List[DiffFile]] = None
+    ) -> List[ReviewComment]:
         """Analyze a single file and return review comments."""
         file_path = diff_file.file_info.path
         logger.debug(f"Starting analysis of {file_path}")
-        
+
         file_comments = []
         skipped_pre_existing = 0
-        
+
         # Detect related files and gather project context
         related_files = await self.context_builder.detect_related_files(diff_file, pr_details)
         project_context = await self.context_builder.build_project_context(diff_file, related_files, pr_details)
-        
+
+        # Fetch full file content for better context
+        full_file_content = None
+        try:
+            full_file_content = self.github_client.get_file_content(
+                pr_details.owner, pr_details.repo, file_path, pr_details.head_sha or 'HEAD'
+            )
+        except Exception as e:
+            logger.debug(f"Could not fetch full file content for {file_path}: {e}")
+            # Fallback to local file if available
+            try:
+                import os
+                local_path = os.path.join(os.getcwd(), file_path)
+                if os.path.exists(local_path):
+                    with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        full_file_content = f.read()
+            except Exception:
+                pass
+
+        # Gather list of all changed files and create a summary
+        all_changed_files = []
+        change_summary = None
+        if all_diff_files:
+            all_changed_files = [df.file_info.path for df in all_diff_files]
+            # Create a summary of changes across all files
+            change_summary = self._build_change_summary(all_diff_files)
+
         # Create enhanced analysis context with project understanding
         context = AnalysisContext(
             pr_details=pr_details,
             file_info=diff_file.file_info,
             language=get_file_language(file_path),
             related_files=related_files,
-            project_context=project_context
+            project_context=project_context,
+            full_file_content=full_file_content,
+            all_changed_files=all_changed_files,
+            change_summary=change_summary
         )
         
         # Get prompt template based on configuration and review type
@@ -730,7 +769,57 @@ class CodeReviewer:
         except GitHubClientError as e:
             logger.error(f"Failed to create GitHub review: {str(e)}")
             return False
-    
+
+    def _build_change_summary(self, diff_files: List[DiffFile]) -> str:
+        """Build a summary of all changes in the PR for cross-file awareness.
+
+        Args:
+            diff_files: List of all diff files in the PR
+
+        Returns:
+            Formatted summary of changes
+        """
+        summary_parts = ["## All Files Changed in This PR:\n"]
+
+        for diff_file in diff_files:
+            file_path = diff_file.file_info.path
+            additions = diff_file.file_info.additions
+            deletions = diff_file.file_info.deletions
+            change_type = diff_file.file_info.change_type or "modified"
+
+            # Extract function/class changes from hunks
+            changed_symbols = []
+            for hunk in diff_file.hunks:
+                # Look for function/class definitions in added lines
+                for line in hunk.lines:
+                    if line.startswith('+'):
+                        clean_line = line[1:].strip()
+                        # Python function/class
+                        if clean_line.startswith('def ') or clean_line.startswith('async def '):
+                            func_match = clean_line.split('(')[0].replace('def ', '').replace('async ', '').strip()
+                            if func_match:
+                                changed_symbols.append(f"def {func_match}")
+                        elif clean_line.startswith('class '):
+                            class_match = clean_line.split('(')[0].split(':')[0].replace('class ', '').strip()
+                            if class_match:
+                                changed_symbols.append(f"class {class_match}")
+                        # JavaScript/TypeScript function
+                        elif 'function ' in clean_line:
+                            import re
+                            match = re.search(r'function\s+(\w+)', clean_line)
+                            if match:
+                                changed_symbols.append(f"function {match.group(1)}")
+
+            symbols_str = ""
+            if changed_symbols:
+                symbols_str = f" (defines: {', '.join(changed_symbols[:5])})"
+
+            summary_parts.append(
+                f"- {file_path} [{change_type}] (+{additions}/-{deletions}){symbols_str}"
+            )
+
+        return "\n".join(summary_parts[:30])  # Limit to 30 files
+
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive processing statistics."""
         github_stats = {}
