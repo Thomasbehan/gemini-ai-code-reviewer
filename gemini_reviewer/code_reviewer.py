@@ -783,9 +783,26 @@ class CodeReviewer:
 
         for diff_file in diff_files:
             file_path = diff_file.file_info.path
-            additions = diff_file.file_info.additions
-            deletions = diff_file.file_info.deletions
-            change_type = diff_file.file_info.change_type or "modified"
+
+            # Calculate additions/deletions from hunks
+            additions = 0
+            deletions = 0
+            for hunk in diff_file.hunks:
+                for line in hunk.lines:
+                    if line.startswith('+') and not line.startswith('+++'):
+                        additions += 1
+                    elif line.startswith('-') and not line.startswith('---'):
+                        deletions += 1
+
+            # Determine change type from FileInfo
+            if diff_file.file_info.is_new_file:
+                change_type = "added"
+            elif diff_file.file_info.is_deleted_file:
+                change_type = "deleted"
+            elif diff_file.file_info.is_renamed_file:
+                change_type = "renamed"
+            else:
+                change_type = "modified"
 
             # Extract function/class changes from hunks
             changed_symbols = []
