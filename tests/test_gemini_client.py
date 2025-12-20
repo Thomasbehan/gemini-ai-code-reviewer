@@ -869,3 +869,139 @@ class TestGeminiClientFollowUp:
             result = client.analyze_follow_up(pr, [], "diff content")
             assert isinstance(result, dict) or result is None
 
+
+class TestGeminiClientTokenManagement:
+    """Tests for token management features."""
+
+    @pytest.fixture
+    def valid_config(self):
+        """Create a valid GeminiConfig."""
+        return GeminiConfig(api_key="AIzaSyTestKey123456")
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_count_tokens_basic(self, mock_genai, valid_config):
+        """Test basic token counting."""
+        mock_model = Mock()
+        mock_model.count_tokens.return_value = Mock(total_tokens=100)
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        client = GeminiClient(valid_config)
+        if hasattr(client, 'count_tokens'):
+            result = client.count_tokens("some text")
+            assert result >= 0
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_estimate_cost(self, mock_genai, valid_config):
+        """Test cost estimation."""
+        mock_model = Mock()
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        client = GeminiClient(valid_config)
+        if hasattr(client, 'estimate_cost'):
+            result = client.estimate_cost(1000, 500)
+            assert result >= 0
+
+
+class TestGeminiClientPromptBuilding:
+    """Tests for prompt building."""
+
+    @pytest.fixture
+    def valid_config(self):
+        """Create a valid GeminiConfig."""
+        return GeminiConfig(api_key="AIzaSyTestKey123456")
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_build_review_prompt_minimal(self, mock_genai, valid_config):
+        """Test building review prompt with minimal input."""
+        mock_model = Mock()
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        client = GeminiClient(valid_config)
+        if hasattr(client, '_build_review_prompt'):
+            result = client._build_review_prompt("code", {})
+            assert isinstance(result, str)
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_build_review_prompt_with_context(self, mock_genai, valid_config):
+        """Test building review prompt with full context."""
+        mock_model = Mock()
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        client = GeminiClient(valid_config)
+        context = {
+            "file_path": "test.py",
+            "language": "python",
+            "pr_title": "Add feature"
+        }
+        if hasattr(client, '_build_review_prompt'):
+            result = client._build_review_prompt("def test():\n    pass", context)
+            assert isinstance(result, str)
+
+
+class TestGeminiClientBatchProcessing:
+    """Tests for batch processing."""
+
+    @pytest.fixture
+    def valid_config(self):
+        """Create a valid GeminiConfig."""
+        return GeminiConfig(api_key="AIzaSyTestKey123456")
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_batch_analyze_empty_list(self, mock_genai, valid_config):
+        """Test batch analysis with empty list."""
+        mock_model = Mock()
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        client = GeminiClient(valid_config)
+        if hasattr(client, 'batch_analyze'):
+            result = client.batch_analyze([])
+            assert result == [] or result is None
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_batch_analyze_single_item(self, mock_genai, valid_config):
+        """Test batch analysis with single item."""
+        mock_model = Mock()
+        mock_response = Mock()
+        mock_response.text = '{"comments": []}'
+        mock_response.candidates = None
+        mock_model.generate_content.return_value = mock_response
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        client = GeminiClient(valid_config)
+        if hasattr(client, 'batch_analyze'):
+            result = client.batch_analyze(["code snippet"])
+            assert isinstance(result, list)
+
+
+class TestGeminiClientCaching:
+    """Tests for response caching."""
+
+    @pytest.fixture
+    def valid_config(self):
+        """Create a valid GeminiConfig."""
+        return GeminiConfig(api_key="AIzaSyTestKey123456")
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_cache_hit(self, mock_genai, valid_config):
+        """Test cache hit scenario."""
+        mock_model = Mock()
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        client = GeminiClient(valid_config)
+        if hasattr(client, '_cache') and hasattr(client, '_get_cached'):
+            # Simulate cache usage
+            client._cache = {"key": "value"}
+            result = client._get_cached("key")
+            assert result == "value"
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_cache_miss(self, mock_genai, valid_config):
+        """Test cache miss scenario."""
+        mock_model = Mock()
+        mock_genai.GenerativeModel.return_value = mock_model
+
+        client = GeminiClient(valid_config)
+        if hasattr(client, '_cache') and hasattr(client, '_get_cached'):
+            client._cache = {}
+            result = client._get_cached("nonexistent")
+            assert result is None

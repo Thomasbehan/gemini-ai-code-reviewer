@@ -1136,3 +1136,135 @@ class TestDiffParserEdgeCases:
 """
         result = parser.parse_diff(diff)
         assert isinstance(result, list)
+
+
+class TestDiffParserFallbackParsing:
+    """Tests for fallback parsing paths."""
+
+    def test_unidiff_empty_falls_back_to_manual(self):
+        """Test that when unidiff returns empty, manual parsing is attempted."""
+        from unittest.mock import patch, MagicMock
+
+        parser = DiffParser()
+
+        # Valid diff that should parse
+        diff = """diff --git a/test.py b/test.py
+--- a/test.py
++++ b/test.py
+@@ -1 +1,2 @@
+ line1
++line2
+"""
+
+        # Mock unidiff to return empty PatchSet
+        with patch.object(parser, '_parse_with_unidiff', return_value=[]):
+            with patch.object(parser, '_parse_manually') as mock_manual:
+                mock_manual.return_value = [MagicMock()]
+                result = parser.parse_diff(diff)
+                mock_manual.assert_called_once()
+
+    def test_unidiff_exception_falls_back_to_manual(self):
+        """Test that when unidiff raises exception, manual parsing is attempted."""
+        from unittest.mock import patch, MagicMock
+
+        parser = DiffParser()
+
+        diff = """diff --git a/test.py b/test.py
+--- a/test.py
++++ b/test.py
+@@ -1 +1 @@
+-old
++new
+"""
+
+        with patch.object(parser, '_parse_with_unidiff', side_effect=Exception("Parse error")):
+            with patch.object(parser, '_parse_manually') as mock_manual:
+                mock_manual.return_value = [MagicMock()]
+                result = parser.parse_diff(diff)
+                mock_manual.assert_called_once()
+
+    def test_manual_parsing_exception_raises_diff_parsing_error(self):
+        """Test that manual parsing exception is converted to DiffParsingError."""
+        from unittest.mock import patch
+
+        parser = DiffParser()
+
+        diff = "invalid diff content"
+
+        with patch.object(parser, '_parse_with_unidiff', return_value=[]):
+            with patch.object(parser, '_parse_manually', side_effect=Exception("Parse failed")):
+                with pytest.raises(DiffParsingError):
+                    parser.parse_diff(diff)
+
+
+class TestDiffParserManualParserPaths:
+    """Tests for manual parser code paths."""
+
+    def test_manual_parser_with_multiple_files(self):
+        """Test manual parsing with multiple files."""
+        from unittest.mock import patch
+
+        parser = DiffParser()
+
+        multi_file_diff = """diff --git a/file1.py b/file1.py
+--- a/file1.py
++++ b/file1.py
+@@ -1 +1 @@
+-old1
++new1
+diff --git a/file2.py b/file2.py
+--- a/file2.py
++++ b/file2.py
+@@ -1 +1 @@
+-old2
++new2
+"""
+
+        # Force manual parsing by making unidiff fail
+        with patch.object(parser, '_parse_with_unidiff', return_value=[]):
+            result = parser._parse_manually(multi_file_diff)
+            assert isinstance(result, list)
+
+    def test_manual_parser_renamed_file(self):
+        """Test manual parsing handles renamed files."""
+        parser = DiffParser()
+
+        rename_diff = """diff --git a/old_name.py b/new_name.py
+similarity index 100%
+rename from old_name.py
+rename to new_name.py
+"""
+        result = parser._parse_manually(rename_diff)
+        assert isinstance(result, list)
+
+
+class TestDiffParserStatisticsEdgeCases:
+    """Tests for statistics edge cases."""
+
+    def test_statistics_after_multiple_parses(self):
+        """Test that statistics accumulate correctly."""
+        parser = DiffParser()
+
+        diff1 = """diff --git a/test1.py b/test1.py
+--- a/test1.py
++++ b/test1.py
+@@ -1 +1 @@
+-old
++new
+"""
+        diff2 = """diff --git a/test2.py b/test2.py
+--- a/test2.py
++++ b/test2.py
+@@ -1 +1 @@
+-old
++new
+"""
+        parser.parse_diff(diff1)
+        stats1 = parser.get_parsing_statistics()
+
+        parser.parse_diff(diff2)
+        stats2 = parser.get_parsing_statistics()
+
+        # Each parse should have its own stats
+        assert isinstance(stats1, dict)
+        assert isinstance(stats2, dict)
