@@ -91,6 +91,7 @@ class ReviewConfig:
     max_context_chars: int = 12000
     position_window: int = 2
     complexity_line_threshold: int = 2000
+    project_context_budget: int = 60000
     
     def __post_init__(self):
         """Validate review configuration."""
@@ -193,7 +194,8 @@ class Config:
             max_comments_per_file=get_env_int("MAX_COMMENTS_PER_FILE", 0, "INPUT_MAX_COMMENTS_PER_FILE"),
             max_context_chars=get_env_int("MAX_CONTEXT_CHARS", 12000),
             position_window=get_env_int("POSITION_WINDOW", 2),
-            complexity_line_threshold=get_env_int("COMPLEXITY_LINE_THRESHOLD", 2000)
+            complexity_line_threshold=get_env_int("COMPLEXITY_LINE_THRESHOLD", 2000),
+            project_context_budget=get_env_int("PROJECT_CONTEXT_BUDGET", 60000)
         )
         
         # Performance configuration

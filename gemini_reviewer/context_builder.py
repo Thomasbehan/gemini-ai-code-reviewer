@@ -9,27 +9,205 @@ import logging
 import os
 import re
 import ast
-from typing import List, Optional, Dict, Set, Any
+from typing import List, Optional, Dict, Set, Any, Tuple
 from pathlib import Path
 
 from .models import DiffFile, PRDetails
+from .utils import get_file_language
 
 logger = logging.getLogger(__name__)
 
 
 class ContextBuilder:
     """Builds analysis context for code review."""
-    
-    def __init__(self, github_client, diff_parser):
+
+    def __init__(self, github_client, diff_parser, project_context_budget: int = 60000):
         """Initialize context builder with required dependencies.
-        
+
         Args:
             github_client: GitHub client for fetching file contents
             diff_parser: Diff parser for language detection
+            project_context_budget: Maximum character budget for project context
         """
         self.github_client = github_client
         self.diff_parser = diff_parser
-    
+        self.project_context_budget = project_context_budget
+
+        # Session-level file content cache (keyed by "path@ref")
+        self._file_cache: Dict[str, Optional[str]] = {}
+
+        # Single-scan repo data (populated lazily by _scan_repo_once)
+        self._repo_scanned: bool = False
+        self._repo_structure: str = ""
+        self._code_files: List[Tuple[str, str]] = []  # (rel_path, abs_path)
+        self._test_file_map: Dict[str, List[str]] = {}  # source base name -> test file rel paths
+        self._config_files: List[str] = []
+
+        # PR-stable context caches (reused across files in same review)
+        self._cached_mental_model: Optional[str] = None
+        self._cached_repo_structure: Optional[str] = None
+        self._cached_code_signatures: Optional[str] = None
+        self._cached_config_files: Optional[List[str]] = None
+
+    # ------------------------------------------------------------------
+    # File content cache
+    # ------------------------------------------------------------------
+
+    def _get_file_content_cached(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
+        """Fetch file content via GitHub API with session-level caching."""
+        cache_key = f"{path}@{ref}"
+        if cache_key not in self._file_cache:
+            try:
+                self._file_cache[cache_key] = self.github_client.get_file_content(owner, repo, path, ref)
+            except Exception:
+                self._file_cache[cache_key] = None
+        return self._file_cache[cache_key]
+
+    def get_cached_file_content(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
+        """Public accessor for cached file content (used by code_reviewer)."""
+        return self._get_file_content_cached(owner, repo, path, ref)
+
+    def clear_cache(self) -> None:
+        """Clear all caches. Call between PR reviews."""
+        self._file_cache.clear()
+        self._repo_scanned = False
+        self._repo_structure = ""
+        self._code_files = []
+        self._test_file_map = {}
+        self._config_files = []
+        self._cached_mental_model = None
+        self._cached_repo_structure = None
+        self._cached_code_signatures = None
+        self._cached_config_files = None
+
+    # ------------------------------------------------------------------
+    # Consolidated repo scan
+    # ------------------------------------------------------------------
+
+    def _scan_repo_once(self) -> None:
+        """Walk the repository once and populate all scan-derived caches."""
+        if self._repo_scanned:
+            return
+
+        repo_root = os.getcwd()
+        tree_lines = ["Repository Structure:"]
+        code_files: List[Tuple[str, str]] = []
+        test_file_map: Dict[str, List[str]] = {}
+        config_files: List[str] = []
+
+        # Directories to exclude
+        exclude_dirs = {
+            '.git', '.github', '__pycache__', 'node_modules', '.venv', 'venv',
+            '.env', '.pytest_cache', '.mypy_cache', '.tox', 'build', 'dist',
+            '.eggs', '*.egg-info', '.idea', '.vscode'
+        }
+        exclude_file_patterns = {'.pyc', '.pyo', '.pyd', '.so', '.dylib', '.dll', '.egg'}
+        code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
+        test_dirs = {'test', 'tests', '__tests__', 'spec', 'specs'}
+        test_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
+
+        # Important config file names
+        config_names = {
+            '.eslintrc', '.eslintrc.js', '.eslintrc.json', '.eslintrc.yml',
+            '.prettierrc', '.prettierrc.js', '.prettierrc.json',
+            '.pylintrc', 'pylint.cfg', '.flake8', 'tox.ini',
+            '.mypy.ini', 'mypy.ini', 'pyproject.toml',
+            'package.json', 'package-lock.json', 'yarn.lock',
+            'requirements.txt', 'Pipfile', 'Pipfile.lock', 'poetry.lock',
+            'go.mod', 'go.sum', 'Gemfile', 'Gemfile.lock',
+            'build.gradle', 'pom.xml', 'Makefile',
+            'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml',
+            '.dockerignore',
+            '.travis.yml', 'circle.yml', '.gitlab-ci.yml',
+            'azure-pipelines.yml', 'Jenkinsfile',
+            'action.yml', 'action.yaml',
+            '.editorconfig', '.gitignore', '.gitattributes',
+        }
+
+        def should_exclude_entry(name: str) -> bool:
+            if name in exclude_dirs:
+                return True
+            if name.startswith('.') and name not in {'.gitignore', '.env.example'}:
+                return True
+            return False
+
+        def should_exclude_file(name: str) -> bool:
+            return any(name.endswith(p) for p in exclude_file_patterns)
+
+        try:
+            # Build tree structure + collect code/test/config files in one walk
+            def scan_dir(path: str, prefix: str = "", depth: int = 0, max_depth: int = 3) -> None:
+                if depth > max_depth:
+                    return
+                try:
+                    entries = sorted(os.listdir(path))
+                except PermissionError:
+                    return
+
+                dirs = [e for e in entries if os.path.isdir(os.path.join(path, e)) and not should_exclude_entry(e)]
+                files = [e for e in entries if os.path.isfile(os.path.join(path, e)) and not should_exclude_entry(e) and not should_exclude_file(e)]
+
+                for i, dirname in enumerate(dirs):
+                    is_last_dir = (i == len(dirs) - 1) and not files
+                    connector = "└── " if is_last_dir else "├── "
+                    tree_lines.append(f"{prefix}{connector}{dirname}/")
+                    new_prefix = prefix + ("    " if is_last_dir else "│   ")
+                    scan_dir(os.path.join(path, dirname), new_prefix, depth + 1, max_depth)
+
+                for i, filename in enumerate(files):
+                    is_last = i == len(files) - 1
+                    connector = "└── " if is_last else "├── "
+                    tree_lines.append(f"{prefix}{connector}{filename}")
+
+                    abs_path = os.path.join(path, filename)
+                    rel_path = os.path.relpath(abs_path, repo_root)
+                    file_ext = os.path.splitext(filename)[1]
+
+                    # Collect code files
+                    if file_ext in code_extensions:
+                        code_files.append((rel_path, abs_path))
+
+                    # Collect test files
+                    if file_ext in test_extensions:
+                        in_test_dir = any(td in rel_path.split(os.sep) for td in test_dirs)
+                        file_lower = filename.lower()
+                        if in_test_dir or file_lower.startswith('test') or file_lower.endswith('test' + file_ext):
+                            # Map base name (without test prefix/suffix) to this test file
+                            base = file_lower
+                            for pref in ('test_', 'test'):
+                                if base.startswith(pref):
+                                    base = base[len(pref):]
+                                    break
+                            for suf in ('_test' + file_ext, 'test' + file_ext):
+                                if base.endswith(suf):
+                                    base = base[:-len(suf)]
+                                    break
+                            # Also store the original name without extension as a key
+                            source_name = os.path.splitext(base)[0] if '.' in base else base
+                            if source_name:
+                                test_file_map.setdefault(source_name, []).append(rel_path)
+
+                    # Collect config files (only from root and .github)
+                    depth_from_root = rel_path.count(os.sep)
+                    in_github = rel_path.startswith('.github' + os.sep)
+                    if depth_from_root <= 1 or in_github:
+                        if filename in config_names or filename.startswith('Dockerfile') or filename.startswith('.env'):
+                            config_files.append(rel_path)
+
+            scan_dir(repo_root)
+        except Exception as e:
+            logger.debug(f"Error during repo scan: {e}")
+
+        self._repo_structure = "\n".join(tree_lines[:200])
+        self._code_files = code_files
+        self._test_file_map = test_file_map
+        self._config_files = config_files
+        self._repo_scanned = True
+
+    # ------------------------------------------------------------------
+    # Related files detection
+    # ------------------------------------------------------------------
+
     async def detect_related_files(self, diff_file: DiffFile, pr_details: PRDetails) -> List[str]:
         """Detect related files based on imports, dependencies, and inheritance.
 
@@ -48,13 +226,9 @@ class ContextBuilder:
 
         try:
             # Get the FULL file content, not just the diff hunks
-            full_content = None
-            try:
-                full_content = self.github_client.get_file_content(
-                    pr_details.owner, pr_details.repo, file_path, pr_details.head_sha or 'HEAD'
-                )
-            except Exception as e:
-                logger.debug(f"Could not fetch full file content for {file_path}: {e}")
+            full_content = self._get_file_content_cached(
+                pr_details.owner, pr_details.repo, file_path, pr_details.head_sha or 'HEAD'
+            )
 
             # Fall back to reading from local filesystem if GitHub fetch fails
             if not full_content:
@@ -109,7 +283,7 @@ class ContextBuilder:
                 ],
             }
 
-            language = self.diff_parser.get_file_language(file_path)
+            language = get_file_language(file_path)
 
             if language and language.lower() in import_patterns:
                 patterns = import_patterns[language.lower()]
@@ -195,17 +369,17 @@ class ContextBuilder:
                     self._extract_type_refs(elt, seen_imports, related_files, current_file)
         except Exception:
             pass
-    
+
     def _import_to_file_path(self, import_path: str, current_file: str, language: str) -> Optional[str]:
         """Convert an import path to a file path.
-        
+
         Args:
             import_path: The import statement path
             current_file: Current file path for relative imports
             language: Programming language
-            
+
         Returns:
-            Converted file path or None if conversion fails
+            Converted file path or None if conversion fails or file doesn't exist
         """
         try:
             # Handle relative imports
@@ -221,7 +395,7 @@ class ContextBuilder:
             else:
                 # For absolute imports, try common patterns
                 base_path = import_path.replace('.', '/')
-            
+
             # Add appropriate extensions based on language
             extensions = {
                 'python': ['.py', '/__init__.py'],
@@ -231,108 +405,47 @@ class ContextBuilder:
                 'go': ['.go'],
                 'ruby': ['.rb']
             }
-            
-            possible_paths = []
+
             if language.lower() in extensions:
+                repo_root = os.getcwd()
                 for ext in extensions[language.lower()]:
-                    possible_paths.append(base_path + ext)
-            
-            # Return the first plausible path
-            return possible_paths[0] if possible_paths else None
-            
+                    candidate = base_path + ext
+                    # Validate that the path actually exists
+                    if os.path.exists(candidate) or os.path.exists(os.path.join(repo_root, candidate)):
+                        return candidate
+
+            return None
+
         except Exception:
             return None
-    
+
+    # ------------------------------------------------------------------
+    # Repo-walk-derived helpers (all use _scan_repo_once data)
+    # ------------------------------------------------------------------
+
     def _scan_repository_structure(self, max_depth: int = 3) -> str:
-        """Scan the repository and create a file tree structure.
-        
-        Args:
-            max_depth: Maximum directory depth to scan
-            
-        Returns:
-            Formatted string showing the repository structure
-        """
-        try:
-            repo_root = os.getcwd()
-            tree_lines = ["Repository Structure:"]
-            
-            # Directories and files to exclude
-            exclude_dirs = {
-                '.git', '.github', '__pycache__', 'node_modules', '.venv', 'venv',
-                '.env', '.pytest_cache', '.mypy_cache', '.tox', 'build', 'dist',
-                '.eggs', '*.egg-info', '.idea', '.vscode'
-            }
-            exclude_patterns = {'.pyc', '.pyo', '.pyd', '.so', '.dylib', '.dll', '.egg'}
-            
-            def should_exclude(path: str, name: str) -> bool:
-                """Check if a path should be excluded."""
-                if name.startswith('.') and name not in {'.gitignore', '.env.example'}:
-                    return True
-                if name in exclude_dirs:
-                    return True
-                if any(name.endswith(pattern) for pattern in exclude_patterns):
-                    return True
-                return False
-            
-            def scan_dir(path: str, prefix: str = "", depth: int = 0) -> None:
-                """Recursively scan directory."""
-                if depth > max_depth:
-                    return
-                
-                try:
-                    entries = sorted(os.listdir(path))
-                    dirs = [e for e in entries if os.path.isdir(os.path.join(path, e)) and not should_exclude(path, e)]
-                    files = [e for e in entries if os.path.isfile(os.path.join(path, e)) and not should_exclude(path, e)]
-                    
-                    # Show directories first
-                    for i, dirname in enumerate(dirs):
-                        is_last_dir = (i == len(dirs) - 1) and not files
-                        connector = "└── " if is_last_dir else "├── "
-                        tree_lines.append(f"{prefix}{connector}{dirname}/")
-                        
-                        new_prefix = prefix + ("    " if is_last_dir else "│   ")
-                        scan_dir(os.path.join(path, dirname), new_prefix, depth + 1)
-                    
-                    # Show files
-                    for i, filename in enumerate(files):
-                        is_last = i == len(files) - 1
-                        connector = "└── " if is_last else "├── "
-                        tree_lines.append(f"{prefix}{connector}{filename}")
-                
-                except PermissionError:
-                    pass
-            
-            scan_dir(repo_root)
-            return "\n".join(tree_lines[:200])  # Limit to 200 lines
-            
-        except Exception as e:
-            logger.debug(f"Error scanning repository structure: {str(e)}")
-            return ""
-    
+        """Return the repository file tree structure (cached from single scan)."""
+        if self._cached_repo_structure is not None:
+            return self._cached_repo_structure
+        self._scan_repo_once()
+        self._cached_repo_structure = self._repo_structure
+        return self._cached_repo_structure
+
     def _find_reverse_dependencies(self, changed_file: str) -> List[str]:
-        """Find files that import or depend on the changed file.
-        
-        Args:
-            changed_file: Path to the changed file
-            
-        Returns:
-            List of file paths that depend on the changed file
-        """
+        """Find files that import or depend on the changed file."""
         reverse_deps = []
         try:
-            repo_root = os.getcwd()
+            self._scan_repo_once()
+
             changed_module = changed_file.replace('/', '.').replace('\\', '.')
-            # Remove extension for module name
             for ext in ['.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb']:
                 if changed_module.endswith(ext):
                     changed_module = changed_module[:-len(ext)]
                     break
-            
-            # Also check for the filename without path for relative imports
+
             changed_filename = os.path.basename(changed_file)
             changed_name = os.path.splitext(changed_filename)[0]
-            
-            # Patterns to search for imports
+
             import_patterns = [
                 rf'from\s+{re.escape(changed_module)}\s+import',
                 rf'import\s+{re.escape(changed_module)}',
@@ -341,44 +454,25 @@ class ContextBuilder:
                 rf'require\(["\'].*{re.escape(changed_filename)}["\']\)',
                 rf'import\s+.*from\s+["\'].*{re.escape(changed_filename)}["\']',
             ]
-            
-            # Search through code files
-            code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
-            exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'build', 'dist'}
-            
-            for root, dirs, files in os.walk(repo_root):
-                dirs[:] = [d for d in dirs if d not in exclude_dirs]
-                
-                for filename in files:
-                    file_ext = os.path.splitext(filename)[1]
-                    if file_ext not in code_extensions:
-                        continue
-                    
-                    file_path = os.path.join(root, filename)
-                    rel_path = os.path.relpath(file_path, repo_root)
-                    
-                    # Skip the changed file itself
-                    if rel_path == changed_file:
-                        continue
-                    
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                        
-                        # Check if any pattern matches
-                        for pattern in import_patterns:
-                            if re.search(pattern, content):
-                                reverse_deps.append(rel_path)
-                                break  # Found a match, no need to check other patterns
-                        
-                        if len(reverse_deps) >= 10:  # Limit to 10 reverse dependencies
+
+            for rel_path, abs_path in self._code_files:
+                if rel_path == changed_file:
+                    continue
+
+                try:
+                    with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+
+                    for pattern in import_patterns:
+                        if re.search(pattern, content):
+                            reverse_deps.append(rel_path)
                             break
-                    except Exception:
-                        continue
-                
-                if len(reverse_deps) >= 10:
-                    break
-            
+
+                    if len(reverse_deps) >= 10:
+                        break
+                except Exception:
+                    continue
+
             logger.info(f"Found {len(reverse_deps)} reverse dependencies for {changed_file}")
         except Exception as e:
             logger.debug(f"Error finding reverse dependencies: {str(e)}")
@@ -386,34 +480,23 @@ class ContextBuilder:
         return reverse_deps
 
     def _find_function_callers(self, changed_file: str, diff_content: str) -> List[Dict[str, Any]]:
-        """Find code that calls functions being modified in this diff.
-
-        Args:
-            changed_file: Path to the changed file
-            diff_content: The diff content to analyze for changed functions
-
-        Returns:
-            List of dicts with caller info: {file, function_name, calling_code}
-        """
+        """Find code that calls functions being modified in this diff."""
         callers = []
         try:
-            repo_root = os.getcwd()
+            self._scan_repo_once()
 
-            # Extract function names that are being added/modified in the diff
+            # Extract function names being added/modified
             changed_functions = set()
             for line in diff_content.split('\n'):
                 if line.startswith('+') and not line.startswith('+++'):
                     clean_line = line[1:].strip()
-                    # Python function definitions
                     if clean_line.startswith('def ') or clean_line.startswith('async def '):
                         func_name = clean_line.split('(')[0].replace('def ', '').replace('async ', '').strip()
                         if func_name:
                             changed_functions.add(func_name)
-                    # JavaScript/TypeScript functions
                     match = re.search(r'function\s+(\w+)', clean_line)
                     if match:
                         changed_functions.add(match.group(1))
-                    # Arrow functions assigned to const
                     match = re.search(r'const\s+(\w+)\s*=', clean_line)
                     if match and '=>' in clean_line:
                         changed_functions.add(match.group(1))
@@ -423,56 +506,39 @@ class ContextBuilder:
 
             logger.debug(f"Looking for callers of functions: {changed_functions}")
 
-            # Search for callers across the codebase
-            code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
-            exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'build', 'dist'}
+            for rel_path, abs_path in self._code_files:
+                if rel_path == changed_file:
+                    continue
 
-            for root, dirs, files in os.walk(repo_root):
-                dirs[:] = [d for d in dirs if d not in exclude_dirs]
+                try:
+                    with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        lines = content.split('\n')
 
-                for filename in files:
-                    file_ext = os.path.splitext(filename)[1]
-                    if file_ext not in code_extensions:
-                        continue
+                    for func_name in changed_functions:
+                        call_pattern = rf'(?<!def\s)(?<!function\s)\b{re.escape(func_name)}\s*\('
 
-                    file_path = os.path.join(root, filename)
-                    rel_path = os.path.relpath(file_path, repo_root)
+                        for i, line in enumerate(lines):
+                            if re.search(call_pattern, line):
+                                start = max(0, i - 3)
+                                end = min(len(lines), i + 4)
+                                context_lines = lines[start:end]
 
-                    # Skip the changed file itself
-                    if rel_path == changed_file:
-                        continue
+                                callers.append({
+                                    'file': rel_path,
+                                    'function_name': func_name,
+                                    'line_number': i + 1,
+                                    'calling_code': '\n'.join(context_lines)
+                                })
 
-                    try:
-                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                            content = f.read()
-                            lines = content.split('\n')
+                                if len(callers) >= 15:
+                                    break
 
-                        for func_name in changed_functions:
-                            # Pattern to find function calls (not definitions)
-                            call_pattern = rf'(?<!def\s)(?<!function\s)\b{re.escape(func_name)}\s*\('
+                    if len(callers) >= 15:
+                        break
 
-                            for i, line in enumerate(lines):
-                                if re.search(call_pattern, line):
-                                    # Get context around the call (3 lines before and after)
-                                    start = max(0, i - 3)
-                                    end = min(len(lines), i + 4)
-                                    context_lines = lines[start:end]
-
-                                    callers.append({
-                                        'file': rel_path,
-                                        'function_name': func_name,
-                                        'line_number': i + 1,
-                                        'calling_code': '\n'.join(context_lines)
-                                    })
-
-                                    if len(callers) >= 15:  # Limit total callers
-                                        break
-
-                        if len(callers) >= 15:
-                            break
-
-                    except Exception:
-                        continue
+                except Exception:
+                    continue
 
                 if len(callers) >= 15:
                     break
@@ -486,20 +552,11 @@ class ContextBuilder:
         return callers
 
     def _find_called_functions(self, file_content: str, file_path: str) -> List[Dict[str, Any]]:
-        """Find definitions of functions that are called in the given file.
-
-        Args:
-            file_content: Content of the file being reviewed
-            file_path: Path to the file
-
-        Returns:
-            List of dicts with called function info
-        """
+        """Find definitions of functions that are called in the given file."""
         called_functions = []
         try:
-            repo_root = os.getcwd()
+            self._scan_repo_once()
 
-            # For Python files, use AST to find function calls
             if file_path.endswith('.py'):
                 try:
                     tree = ast.parse(file_content)
@@ -512,52 +569,40 @@ class ContextBuilder:
                             elif isinstance(node.func, ast.Attribute):
                                 function_calls.add(node.func.attr)
 
-                    # Now search for definitions of these functions
-                    code_extensions = {'.py'}
-                    exclude_dirs = {'.git', '__pycache__', 'node_modules', '.venv', 'venv', 'build', 'dist'}
+                    for rel_path, abs_path in self._code_files:
+                        if not rel_path.endswith('.py'):
+                            continue
+                        if rel_path == file_path:
+                            continue
 
-                    for root, dirs, files in os.walk(repo_root):
-                        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+                        try:
+                            with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                search_content = f.read()
 
-                        for filename in files:
-                            if not filename.endswith('.py'):
-                                continue
+                            search_tree = ast.parse(search_content)
 
-                            search_path = os.path.join(root, filename)
-                            rel_path = os.path.relpath(search_path, repo_root)
+                            for node in ast.walk(search_tree):
+                                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                                    if node.name in function_calls:
+                                        lines = search_content.split('\n')
+                                        start_line = node.lineno - 1
+                                        end_line = min(start_line + 15, len(lines))
+                                        func_code = '\n'.join(lines[start_line:end_line])
 
-                            if rel_path == file_path:
-                                continue
+                                        called_functions.append({
+                                            'file': rel_path,
+                                            'function_name': node.name,
+                                            'definition': func_code
+                                        })
 
-                            try:
-                                with open(search_path, 'r', encoding='utf-8', errors='ignore') as f:
-                                    search_content = f.read()
+                                        if len(called_functions) >= 10:
+                                            break
 
-                                search_tree = ast.parse(search_content)
+                            if len(called_functions) >= 10:
+                                break
 
-                                for node in ast.walk(search_tree):
-                                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                                        if node.name in function_calls:
-                                            # Get the function definition with a few lines of body
-                                            lines = search_content.split('\n')
-                                            start_line = node.lineno - 1
-                                            end_line = min(start_line + 15, len(lines))  # Get up to 15 lines
-                                            func_code = '\n'.join(lines[start_line:end_line])
-
-                                            called_functions.append({
-                                                'file': rel_path,
-                                                'function_name': node.name,
-                                                'definition': func_code
-                                            })
-
-                                            if len(called_functions) >= 10:
-                                                break
-
-                                if len(called_functions) >= 10:
-                                    break
-
-                            except Exception:
-                                continue
+                        except Exception:
+                            continue
 
                         if len(called_functions) >= 10:
                             break
@@ -572,6 +617,41 @@ class ContextBuilder:
             logger.debug(f"Error finding called functions: {str(e)}")
 
         return called_functions
+
+    def _find_test_files(self, changed_file: str) -> List[str]:
+        """Find test files related to the changed file."""
+        self._scan_repo_once()
+        changed_name = os.path.splitext(os.path.basename(changed_file))[0]
+
+        test_files = []
+        # Direct lookup from the test file map
+        if changed_name in self._test_file_map:
+            test_files.extend(self._test_file_map[changed_name])
+
+        # Also search for partial matches in the map
+        for source_name, paths in self._test_file_map.items():
+            if len(test_files) >= 5:
+                break
+            if changed_name in source_name or source_name in changed_name:
+                for p in paths:
+                    if p not in test_files:
+                        test_files.append(p)
+                        if len(test_files) >= 5:
+                            break
+
+        test_files = test_files[:5]
+        if test_files:
+            logger.info(f"Found {len(test_files)} test files for {changed_file}")
+        return test_files
+
+    def _find_config_files(self) -> List[str]:
+        """Find configuration files (cached from single scan)."""
+        if self._cached_config_files is not None:
+            return self._cached_config_files
+        self._scan_repo_once()
+        self._cached_config_files = self._config_files
+        logger.info(f"Found {len(self._cached_config_files)} config files")
+        return self._cached_config_files
 
     def _score_related_file_relevance(self, related_file: str, changed_file: str, diff_content: str) -> float:
         """Score how relevant a related file is to the changed file.
@@ -674,166 +754,49 @@ class ContextBuilder:
 
         return selected
 
-    def _find_test_files(self, changed_file: str) -> List[str]:
-        """Find test files related to the changed file.
+    # ------------------------------------------------------------------
+    # PR-stable helpers
+    # ------------------------------------------------------------------
 
-        Args:
-            changed_file: Path to the changed file
-            
-        Returns:
-            List of related test file paths
-        """
-        test_files = []
-        try:
-            repo_root = os.getcwd()
-            changed_name = os.path.splitext(os.path.basename(changed_file))[0]
-            changed_dir = os.path.dirname(changed_file)
-            
-            # Common test patterns
-            test_patterns = [
-                f'test_{changed_name}',
-                f'{changed_name}_test',
-                f'test{changed_name}',
-                changed_name,  # Test file might have same name in test directory
-            ]
-            
-            test_dirs = {'test', 'tests', '__tests__', 'spec', 'specs'}
-            test_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
-            
-            # Search in test directories
-            for root, dirs, files in os.walk(repo_root):
-                # Prioritize test directories
-                dir_name = os.path.basename(root)
-                in_test_dir = any(test_dir in root for test_dir in test_dirs)
-                
-                for filename in files:
-                    file_ext = os.path.splitext(filename)[1]
-                    if file_ext not in test_extensions:
-                        continue
-                    
-                    file_lower = filename.lower()
-                    # Check if filename matches test patterns
-                    if in_test_dir or file_lower.startswith('test') or file_lower.endswith('test' + file_ext):
-                        # Check if it's related to our changed file
-                        for pattern in test_patterns:
-                            if pattern in file_lower:
-                                file_path = os.path.join(root, filename)
-                                rel_path = os.path.relpath(file_path, repo_root)
-                                test_files.append(rel_path)
-                                break
-                    
-                    if len(test_files) >= 5:  # Limit to 5 test files
-                        break
-                
-                if len(test_files) >= 5:
-                    break
-            
-            logger.info(f"Found {len(test_files)} test files for {changed_file}")
-        except Exception as e:
-            logger.debug(f"Error finding test files: {str(e)}")
-        
-        return test_files
-    
-    def _find_config_files(self) -> List[str]:
-        """Find configuration files (linters, build scripts, Dockerfiles, etc.).
-        
-        Returns:
-            List of configuration file paths
-        """
-        config_files = []
-        try:
-            repo_root = os.getcwd()
-            
-            # Important config file patterns
-            config_patterns = [
-                # Linters and formatters
-                '.eslintrc', '.eslintrc.js', '.eslintrc.json', '.eslintrc.yml',
-                '.prettierrc', '.prettierrc.js', '.prettierrc.json',
-                '.pylintrc', 'pylint.cfg', '.flake8', 'tox.ini',
-                '.mypy.ini', 'mypy.ini', 'pyproject.toml',
-                # Build and dependency management
-                'package.json', 'package-lock.json', 'yarn.lock',
-                'requirements.txt', 'Pipfile', 'Pipfile.lock', 'poetry.lock',
-                'go.mod', 'go.sum', 'Gemfile', 'Gemfile.lock',
-                'build.gradle', 'pom.xml', 'Makefile',
-                # Docker and containerization
-                'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml',
-                '.dockerignore',
-                # CI/CD
-                '.travis.yml', 'circle.yml', '.gitlab-ci.yml',
-                'azure-pipelines.yml', 'Jenkinsfile',
-                # GitHub specific
-                'action.yml', 'action.yaml',
-                # Editor and IDE
-                '.editorconfig',
-                # Git
-                '.gitignore', '.gitattributes',
-            ]
-            
-            # Search for config files in root and common directories
-            search_dirs = [repo_root, os.path.join(repo_root, '.github')]
-            
-            for search_dir in search_dirs:
-                if not os.path.exists(search_dir):
-                    continue
-                
-                try:
-                    for item in os.listdir(search_dir):
-                        if item in config_patterns or any(item.startswith(p) for p in ['Dockerfile', '.env']):
-                            file_path = os.path.join(search_dir, item)
-                            if os.path.isfile(file_path):
-                                rel_path = os.path.relpath(file_path, repo_root)
-                                config_files.append(rel_path)
-                except Exception:
-                    continue
-            
-            logger.info(f"Found {len(config_files)} config files")
-        except Exception as e:
-            logger.debug(f"Error finding config files: {str(e)}")
-        
-        return config_files
-    
     def _build_repo_mental_model(self) -> str:
-        """Build a compact repo-level mental model with key information.
-        
-        Returns:
-            Formatted string with repo overview
-        """
+        """Build a compact repo-level mental model with key information (cached)."""
+        if self._cached_mental_model is not None:
+            return self._cached_mental_model
+
         model_parts = []
-        
+
         try:
             repo_root = os.getcwd()
-            
+
             # 1. Documentation summaries (README, CONTRIBUTING, etc.)
-            doc_files = ['README.md', 'README.rst', 'CONTRIBUTING.md', 'ARCHITECTURE.md', 
+            doc_files = ['README.md', 'README.rst', 'CONTRIBUTING.md', 'ARCHITECTURE.md',
                         'ADR.md', 'DESIGN.md', 'docs/README.md']
-            
+
             for doc_file in doc_files:
                 doc_path = os.path.join(repo_root, doc_file)
                 if os.path.exists(doc_path):
                     try:
                         with open(doc_path, 'r', encoding='utf-8', errors='ignore') as f:
                             content = f.read()
-                        
-                        # Extract first 1000 chars or first few sections
+
                         lines = content.split('\n')
                         summary_lines = []
                         char_count = 0
-                        
-                        for line in lines[:50]:  # First 50 lines max
+
+                        for line in lines[:50]:
                             summary_lines.append(line)
                             char_count += len(line)
                             if char_count > 1000:
                                 break
-                        
+
                         summary = '\n'.join(summary_lines)
                         if len(content) > char_count:
                             summary += "\n... (truncated)"
-                        
+
                         model_parts.append(f"## {doc_file} Summary:\n{summary}\n")
                     except Exception:
                         pass
-            
+
             # 2. Entrypoints identification
             entrypoint_files = [
                 'main.py', 'app.py', '__main__.py', 'run.py', 'server.py',
@@ -843,16 +806,16 @@ class ContextBuilder:
                 'action.yml', 'action.yaml',
                 'Dockerfile', 'docker-compose.yml',
             ]
-            
+
             found_entrypoints = []
             for entry in entrypoint_files:
                 entry_path = os.path.join(repo_root, entry)
                 if os.path.exists(entry_path) and os.path.isfile(entry_path):
                     found_entrypoints.append(entry)
-            
+
             if found_entrypoints:
                 model_parts.append(f"## Entrypoints:\n" + "\n".join(f"- {e}" for e in found_entrypoints) + "\n")
-            
+
             # 3. Package/dependency management and scripts
             pkg_files = {
                 'package.json': ['scripts', 'dependencies', 'devDependencies'],
@@ -862,15 +825,14 @@ class ContextBuilder:
                 'go.mod': ['module', 'require'],
                 'Gemfile': None,
             }
-            
+
             for pkg_file, keys_to_extract in pkg_files.items():
                 pkg_path = os.path.join(repo_root, pkg_file)
                 if os.path.exists(pkg_path):
                     try:
                         with open(pkg_path, 'r', encoding='utf-8', errors='ignore') as f:
                             content = f.read()
-                        
-                        # For JSON files, try to extract scripts
+
                         if pkg_file.endswith('.json'):
                             import json
                             try:
@@ -881,25 +843,24 @@ class ContextBuilder:
                                         scripts_info.append(f"  {key}:")
                                         for name, cmd in list(data[key].items())[:10]:
                                             scripts_info.append(f"    - {name}: {cmd}")
-                                
+
                                 if scripts_info:
                                     model_parts.append(f"## {pkg_file}:\n" + "\n".join(scripts_info) + "\n")
                             except json.JSONDecodeError:
                                 pass
                         else:
-                            # For other files, include a snippet
                             lines = content.split('\n')[:20]
                             model_parts.append(f"## {pkg_file} (first 20 lines):\n" + "\n".join(lines) + "\n")
                     except Exception:
                         pass
-            
+
             # 4. CI/CD workflows
             ci_dirs = [
                 os.path.join(repo_root, '.github', 'workflows'),
                 os.path.join(repo_root, '.gitlab'),
                 os.path.join(repo_root, '.circleci'),
             ]
-            
+
             workflow_files = []
             for ci_dir in ci_dirs:
                 if os.path.exists(ci_dir):
@@ -909,22 +870,22 @@ class ContextBuilder:
                                 workflow_files.append(os.path.relpath(os.path.join(ci_dir, item), repo_root))
                     except Exception:
                         pass
-            
+
             if workflow_files:
                 model_parts.append(f"## CI/CD Workflows:\n" + "\n".join(f"- {w}" for w in workflow_files) + "\n")
-            
+
             # 5. Environment samples and lockfiles
             env_files = []
-            for item in ['.env.example', '.env.sample', '.env.template', 
-                        'package-lock.json', 'yarn.lock', 'poetry.lock', 
+            for item in ['.env.example', '.env.sample', '.env.template',
+                        'package-lock.json', 'yarn.lock', 'poetry.lock',
                         'Pipfile.lock', 'go.sum', 'Gemfile.lock']:
                 item_path = os.path.join(repo_root, item)
                 if os.path.exists(item_path):
                     env_files.append(item)
-            
+
             if env_files:
                 model_parts.append(f"## Environment & Lockfiles:\n" + "\n".join(f"- {e}" for e in env_files) + "\n")
-            
+
             # 6. Service boundaries / Architecture (detect major directories)
             major_dirs = []
             try:
@@ -935,34 +896,29 @@ class ContextBuilder:
                             major_dirs.append(item)
             except Exception:
                 pass
-            
+
             if major_dirs:
                 model_parts.append(f"## Major Packages/Modules:\n" + "\n".join(f"- {d}/" for d in major_dirs[:15]) + "\n")
-            
+
         except Exception as e:
             logger.debug(f"Error building repo mental model: {str(e)}")
-        
+
         if model_parts:
-            return "# Repository Mental Model\n\n" + "\n".join(model_parts)
-        return ""
-    
+            self._cached_mental_model = "# Repository Mental Model\n\n" + "\n".join(model_parts)
+        else:
+            self._cached_mental_model = ""
+        return self._cached_mental_model
+
     def _extract_code_signatures(self, max_files: int = 50) -> str:
-        """Extract function and class signatures from code files in the repository.
-        
-        Args:
-            max_files: Maximum number of files to process
-            
-        Returns:
-            Formatted string with code signatures
-        """
+        """Extract function and class signatures from code files (cached)."""
+        if self._cached_code_signatures is not None:
+            return self._cached_code_signatures
+
         try:
-            repo_root = os.getcwd()
+            self._scan_repo_once()
             signatures = ["Code Structure (Functions & Classes):"]
             files_processed = 0
-            
-            # File extensions to process
-            code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
-            
+
             def extract_python_signatures(file_path: str, rel_path: str) -> List[str]:
                 """Extract signatures from Python files with full type annotations."""
                 sigs = []
@@ -973,13 +929,11 @@ class ContextBuilder:
                     tree = ast.parse(content)
 
                     def format_annotation(ann) -> str:
-                        """Format an AST annotation node to string."""
                         if ann is None:
                             return ""
                         try:
                             return ast.unparse(ann)
                         except Exception:
-                            # Fallback for older Python versions
                             if isinstance(ann, ast.Name):
                                 return ann.id
                             elif isinstance(ann, ast.Constant):
@@ -989,11 +943,10 @@ class ContextBuilder:
                             return "?"
 
                     def format_function_signature(node) -> str:
-                        """Format a function/method with full signature."""
                         params = []
                         all_args = node.args.args + node.args.kwonlyargs
 
-                        for arg in all_args[:6]:  # Limit params shown
+                        for arg in all_args[:6]:
                             param_str = arg.arg
                             if arg.annotation:
                                 type_str = format_annotation(arg.annotation)
@@ -1011,22 +964,18 @@ class ContextBuilder:
                         prefix = "async def" if isinstance(node, ast.AsyncFunctionDef) else "def"
                         return f"  {prefix} {node.name}({params_str}){return_type}"
 
-                    # Process top-level nodes
                     for node in ast.iter_child_nodes(tree):
                         if isinstance(node, ast.ClassDef):
-                            # Get base classes
                             bases = []
                             for base in node.bases[:3]:
                                 bases.append(format_annotation(base))
                             base_str = f"({', '.join(bases)})" if bases else ""
 
-                            # Get methods with their signatures
                             methods = []
                             for item in node.body:
                                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                                    # Format method signature compactly
                                     method_params = []
-                                    for arg in item.args.args[1:4]:  # Skip 'self', limit to 3
+                                    for arg in item.args.args[1:4]:
                                         if arg.annotation:
                                             method_params.append(f"{arg.arg}: {format_annotation(arg.annotation)}")
                                         else:
@@ -1035,292 +984,277 @@ class ContextBuilder:
                                     methods.append(f"{item.name}({', '.join(method_params)}){ret}")
 
                             sigs.append(f"  class {node.name}{base_str}:")
-                            for method in methods[:8]:  # Limit methods per class
+                            for method in methods[:8]:
                                 sigs.append(f"    {method}")
 
                         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                             sigs.append(format_function_signature(node))
 
                 except SyntaxError:
-                    pass  # File has syntax errors
+                    pass
                 except Exception:
                     pass
 
                 return sigs
-            
+
             def extract_generic_signatures(file_path: str, rel_path: str) -> List[str]:
                 """Extract signatures from other code files using regex."""
                 sigs = []
                 try:
                     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
-                    
-                    # Match function/method declarations (simple patterns)
-                    # JavaScript/TypeScript: function name(...) or const name = (...) =>
+
                     patterns = [
                         r'function\s+(\w+)\s*\(',
                         r'const\s+(\w+)\s*=\s*\([^)]*\)\s*=>',
                         r'export\s+function\s+(\w+)\s*\(',
                         r'class\s+(\w+)',
-                        # Go: func Name(
                         r'func\s+(\w+)\s*\(',
-                        # Java: public/private void/type Name(
                         r'(?:public|private|protected)\s+(?:static\s+)?(?:\w+)\s+(\w+)\s*\(',
                     ]
-                    
+
                     found_names = set()
                     for pattern in patterns:
                         matches = re.findall(pattern, content)
-                        for match in matches[:10]:  # Limit per pattern
+                        for match in matches[:10]:
                             if match not in found_names:
                                 found_names.add(match)
                                 sigs.append(f"  {match}")
-                
+
                 except Exception:
                     pass
-                
+
                 return sigs
-            
-            # Walk through repository
-            for root, dirs, files in os.walk(repo_root):
-                # Skip excluded directories
-                dirs[:] = [d for d in dirs if d not in {'.git', '.github', '__pycache__', 'node_modules', '.venv', 'venv', 'build', 'dist'}]
-                
-                for filename in files:
-                    if files_processed >= max_files:
-                        break
-                    
-                    file_ext = os.path.splitext(filename)[1]
-                    if file_ext not in code_extensions:
-                        continue
-                    
-                    file_path = os.path.join(root, filename)
-                    rel_path = os.path.relpath(file_path, repo_root)
-                    
-                    # Extract signatures based on file type
-                    file_sigs = []
-                    if file_ext == '.py':
-                        file_sigs = extract_python_signatures(file_path, rel_path)
-                    else:
-                        file_sigs = extract_generic_signatures(file_path, rel_path)
-                    
-                    if file_sigs:
-                        signatures.append(f"\n{rel_path}:")
-                        signatures.extend(file_sigs[:20])  # Limit signatures per file
-                        files_processed += 1
-                
+
+            # Iterate over pre-scanned code files instead of os.walk
+            for rel_path, abs_path in self._code_files:
                 if files_processed >= max_files:
                     break
-            
-            result = "\n".join(signatures[:500])  # Limit total lines
-            return result if len(signatures) > 1 else ""
-            
+
+                file_ext = os.path.splitext(rel_path)[1]
+                file_sigs = []
+                if file_ext == '.py':
+                    file_sigs = extract_python_signatures(abs_path, rel_path)
+                else:
+                    file_sigs = extract_generic_signatures(abs_path, rel_path)
+
+                if file_sigs:
+                    signatures.append(f"\n{rel_path}:")
+                    signatures.extend(file_sigs[:20])
+                    files_processed += 1
+
+            result = "\n".join(signatures[:500])
+            self._cached_code_signatures = result if len(signatures) > 1 else ""
+
         except Exception as e:
             logger.debug(f"Error extracting code signatures: {str(e)}")
-            return ""
-    
+            self._cached_code_signatures = ""
+
+        return self._cached_code_signatures
+
+    # ------------------------------------------------------------------
+    # Main context builder
+    # ------------------------------------------------------------------
+
     async def build_project_context(
-        self, 
-        diff_file: DiffFile, 
-        related_files: List[str], 
+        self,
+        diff_file: DiffFile,
+        related_files: List[str],
         pr_details: PRDetails
     ) -> Optional[str]:
         """Build project context including repo mental model, dependency-adjacent code,
         full repository structure, code signatures, previous comments, and related file contents.
-        
+
         Args:
             diff_file: The diff file being analyzed
             related_files: List of related file paths
             pr_details: Pull request details
-            
+
         Returns:
             Formatted project context string or None if no context available
         """
-        context_parts = []
-        max_context_size = 60000  # Increased limit for comprehensive context
-        current_size = 0
-        
+        max_context_size = self.project_context_budget
+
         try:
             logger.info("Building comprehensive repository context for code review")
-            
-            # LAYER 1: Repo-level mental model (HIGHEST PRIORITY)
-            # Provides understanding of the entire codebase structure, entrypoints, docs, etc.
-            repo_mental_model = self._build_repo_mental_model()
-            if repo_mental_model:
-                context_parts.append(repo_mental_model)
-                current_size += len(repo_mental_model)
-                logger.info(f"Added repo mental model ({len(repo_mental_model)} chars)")
-            
-            # LAYER 2: Dependency-adjacent code
-            # Files that import/are imported by changed files, tests, and configs
-            if current_size < max_context_size:
-                dep_adjacent_parts = []
-                
-                # 2a. Reverse dependencies (files that import this file)
-                reverse_deps = self._find_reverse_dependencies(diff_file.file_info.path)
-                if reverse_deps:
-                    dep_adjacent_parts.append(f"#### Reverse Dependencies (files that import {diff_file.file_info.path}):\n" + 
-                                             "\n".join(f"- {rd}" for rd in reverse_deps))
-                    logger.info(f"Found {len(reverse_deps)} reverse dependencies")
-                
-                # 2b. Related test files
-                test_files = self._find_test_files(diff_file.file_info.path)
-                if test_files:
-                    dep_adjacent_parts.append(f"#### Related Test Files:\n" + 
-                                             "\n".join(f"- {tf}" for tf in test_files))
-                    logger.info(f"Found {len(test_files)} test files")
-                
-                # 2c. Configuration files
-                config_files = self._find_config_files()
-                if config_files:
-                    dep_adjacent_parts.append(f"#### Configuration Files:\n" + 
-                                             "\n".join(f"- {cf}" for cf in config_files[:15]))  # Limit to 15
-                    logger.info(f"Found {len(config_files)} config files")
-                
-                if dep_adjacent_parts:
-                    dep_section = "### Dependency-Adjacent Code\n\n" + "\n\n".join(dep_adjacent_parts) + "\n"
-                    context_parts.append(dep_section)
-                    current_size += len(dep_section)
-                    logger.info(f"Added dependency-adjacent code section ({len(dep_section)} chars)")
-            
-            # STEP 3: Add full repository structure
-            if current_size < max_context_size:
-                repo_structure = self._scan_repository_structure()
-                if repo_structure:
-                    context_parts.append(f"### Full Repository Structure\n{repo_structure}\n")
-                    current_size += len(repo_structure)
-                    logger.info(f"Added repository structure ({len(repo_structure)} chars)")
-            
-            # STEP 4: Add code signatures from all files
-            if current_size < max_context_size:
-                code_signatures = self._extract_code_signatures()
-                if code_signatures:
-                    context_parts.append(f"### {code_signatures}\n")
-                    current_size += len(code_signatures)
-                    logger.info(f"Added code signatures ({len(code_signatures)} chars)")
-            
-            # STEP 5: Always include previous inline comments on this file (if any)
-            if current_size < max_context_size:
-                try:
-                    prev = self.github_client.get_file_review_comments(
-                        pr_details, 
-                        diff_file.file_info.path, 
-                        limit=30
-                    )
-                    if prev:
-                        # Previous comments help verify resolutions
-                        snippet = prev
-                        if len(snippet) > 4000:
-                            snippet = snippet[:4000] + "\n... (truncated)"
-                        context_parts.append(f"### Previous review history for {diff_file.file_info.path}\n{snippet}\n")
-                        current_size += len(snippet)
-                except Exception:
-                    pass
-            
-            # STEP 6: Forward dependencies (related files content) - prioritized by relevance
-            if related_files:
-                # Build diff content for scoring
-                diff_content = "\n".join(
-                    line for hunk in diff_file.hunks for line in hunk.lines
-                )
 
-                # Score and sort related files by relevance
+            # Pre-compute diff_content once (used by multiple steps)
+            diff_content = "\n".join(
+                line for hunk in diff_file.hunks for line in hunk.lines
+            )
+
+            # Collect all context sections with priorities for budget-aware assembly
+            sections: List[Dict[str, Any]] = []
+
+            # SECTION: Previous review comments (highest priority for follow-ups)
+            try:
+                prev = self.github_client.get_file_review_comments(
+                    pr_details,
+                    diff_file.file_info.path,
+                    limit=30
+                )
+                if prev:
+                    snippet = prev
+                    if len(snippet) > 4000:
+                        snippet = snippet[:4000] + "\n... (truncated)"
+                    sections.append({
+                        'content': f"### Previous review history for {diff_file.file_info.path}\n{snippet}\n",
+                        'priority': 1.0,
+                        'name': 'previous_comments'
+                    })
+            except Exception:
+                pass
+
+            # SECTION: Related file contents (forward dependencies)
+            if related_files:
                 scored_files = []
                 for related_file in related_files:
                     score = self._score_related_file_relevance(
                         related_file, diff_file.file_info.path, diff_content
                     )
                     scored_files.append((related_file, score))
-
-                # Sort by score descending (most relevant first)
                 scored_files.sort(key=lambda x: x[1], reverse=True)
                 logger.debug(f"Prioritized related files: {[(f, f'{s:.2f}') for f, s in scored_files[:5]]}")
 
+                related_parts = []
                 for related_file, score in scored_files:
-                    if current_size >= max_context_size:
-                        break
-
-                    # Try to fetch the file content from the base branch
-                    content = self.github_client.get_file_content(
+                    content = self._get_file_content_cached(
                         pr_details.owner,
                         pr_details.repo,
                         related_file,
                         pr_details.base_sha or 'main'
                     )
-
                     if content:
-                        # Allocate more space to higher relevance files
                         if score >= 0.5:
                             max_file_size = 10000
                         elif score >= 0.3:
                             max_file_size = 6000
                         else:
                             max_file_size = 3000
-
                         if len(content) > max_file_size:
                             content = content[:max_file_size] + "\n... (truncated)"
-
                         relevance_note = f" [relevance: {score:.2f}]" if score > 0 else ""
-                        context_parts.append(
+                        related_parts.append(
                             f"### Related file (forward dependency): {related_file}{relevance_note}\n```\n{content}\n```\n"
                         )
-                        current_size += len(content)
 
-            # STEP 7: Find callers of functions being changed
-            if current_size < max_context_size:
-                try:
-                    # Build diff content from hunks
-                    diff_content = "\n".join(
-                        line for hunk in diff_file.hunks for line in hunk.lines
-                    )
-                    callers = self._find_function_callers(diff_file.file_info.path, diff_content)
-                    if callers:
-                        caller_parts = ["### Code That Calls Changed Functions\n"]
-                        caller_parts.append("These code snippets call functions that are being modified in this PR.\n")
-                        caller_parts.append("Changes to function signatures or behavior may affect these callers:\n")
+                if related_parts:
+                    sections.append({
+                        'content': "\n".join(related_parts),
+                        'priority': 0.9,
+                        'name': 'related_files'
+                    })
 
-                        for caller in callers[:10]:  # Limit displayed
-                            caller_parts.append(f"\n#### {caller['file']} calls `{caller['function_name']}` (line {caller['line_number']}):")
-                            caller_parts.append(f"```\n{caller['calling_code']}\n```")
+            # SECTION: Function callers
+            try:
+                callers = self._find_function_callers(diff_file.file_info.path, diff_content)
+                if callers:
+                    caller_parts = ["### Code That Calls Changed Functions\n"]
+                    caller_parts.append("These code snippets call functions that are being modified in this PR.\n")
+                    caller_parts.append("Changes to function signatures or behavior may affect these callers:\n")
 
-                        caller_section = "\n".join(caller_parts)
-                        context_parts.append(caller_section)
-                        current_size += len(caller_section)
-                        logger.info(f"Added {len(callers)} function caller contexts ({len(caller_section)} chars)")
-                except Exception as e:
-                    logger.debug(f"Error finding function callers: {e}")
+                    for caller in callers[:10]:
+                        caller_parts.append(f"\n#### {caller['file']} calls `{caller['function_name']}` (line {caller['line_number']}):")
+                        caller_parts.append(f"```\n{caller['calling_code']}\n```")
 
-            # STEP 8: Find definitions of functions being called
-            if current_size < max_context_size:
-                try:
-                    # Get full file content to analyze calls
-                    file_content = self.github_client.get_file_content(
-                        pr_details.owner, pr_details.repo,
-                        diff_file.file_info.path,
-                        pr_details.head_sha or 'HEAD'
-                    )
-                    if file_content:
-                        called_funcs = self._find_called_functions(file_content, diff_file.file_info.path)
-                        if called_funcs:
-                            called_parts = ["### Definitions of Functions Being Called\n"]
-                            called_parts.append("These are definitions of functions called in the changed file:\n")
+                    sections.append({
+                        'content': "\n".join(caller_parts),
+                        'priority': 0.85,
+                        'name': 'function_callers'
+                    })
+                    logger.info(f"Found {len(callers)} function caller contexts")
+            except Exception as e:
+                logger.debug(f"Error finding function callers: {e}")
 
-                            for func in called_funcs[:8]:  # Limit displayed
-                                called_parts.append(f"\n#### `{func['function_name']}` from {func['file']}:")
-                                called_parts.append(f"```\n{func['definition']}\n```")
+            # SECTION: Called function definitions
+            try:
+                file_content = self._get_file_content_cached(
+                    pr_details.owner, pr_details.repo,
+                    diff_file.file_info.path,
+                    pr_details.head_sha or 'HEAD'
+                )
+                if file_content:
+                    called_funcs = self._find_called_functions(file_content, diff_file.file_info.path)
+                    if called_funcs:
+                        called_parts = ["### Definitions of Functions Being Called\n"]
+                        called_parts.append("These are definitions of functions called in the changed file:\n")
 
-                            called_section = "\n".join(called_parts)
-                            context_parts.append(called_section)
-                            current_size += len(called_section)
-                            logger.info(f"Added {len(called_funcs)} called function definitions ({len(called_section)} chars)")
-                except Exception as e:
-                    logger.debug(f"Error finding called functions: {e}")
+                        for func in called_funcs[:8]:
+                            called_parts.append(f"\n#### `{func['function_name']}` from {func['file']}:")
+                            called_parts.append(f"```\n{func['definition']}\n```")
 
-            if context_parts:
-                logger.info(f"Built comprehensive project context with {len(context_parts)} sections (~{current_size} chars)")
-                return "\n".join(context_parts)
-                
+                        sections.append({
+                            'content': "\n".join(called_parts),
+                            'priority': 0.8,
+                            'name': 'called_functions'
+                        })
+                        logger.info(f"Found {len(called_funcs)} called function definitions")
+            except Exception as e:
+                logger.debug(f"Error finding called functions: {e}")
+
+            # SECTION: Code signatures (PR-stable, cached)
+            code_signatures = self._extract_code_signatures()
+            if code_signatures:
+                sections.append({
+                    'content': f"### {code_signatures}\n",
+                    'priority': 0.6,
+                    'name': 'code_signatures'
+                })
+
+            # SECTION: Repo mental model (PR-stable, cached)
+            repo_mental_model = self._build_repo_mental_model()
+            if repo_mental_model:
+                sections.append({
+                    'content': repo_mental_model,
+                    'priority': 0.5,
+                    'name': 'repo_mental_model'
+                })
+
+            # SECTION: Dependency-adjacent listing
+            dep_adjacent_parts = []
+            reverse_deps = self._find_reverse_dependencies(diff_file.file_info.path)
+            if reverse_deps:
+                dep_adjacent_parts.append(f"#### Reverse Dependencies (files that import {diff_file.file_info.path}):\n" +
+                                         "\n".join(f"- {rd}" for rd in reverse_deps))
+                logger.info(f"Found {len(reverse_deps)} reverse dependencies")
+
+            test_files = self._find_test_files(diff_file.file_info.path)
+            if test_files:
+                dep_adjacent_parts.append(f"#### Related Test Files:\n" +
+                                         "\n".join(f"- {tf}" for tf in test_files))
+                logger.info(f"Found {len(test_files)} test files")
+
+            config_files = self._find_config_files()
+            if config_files:
+                dep_adjacent_parts.append(f"#### Configuration Files:\n" +
+                                         "\n".join(f"- {cf}" for cf in config_files[:15]))
+                logger.info(f"Found {len(config_files)} config files")
+
+            if dep_adjacent_parts:
+                sections.append({
+                    'content': "### Dependency-Adjacent Code\n\n" + "\n\n".join(dep_adjacent_parts) + "\n",
+                    'priority': 0.4,
+                    'name': 'dependency_adjacent'
+                })
+
+            # SECTION: Repo structure tree (PR-stable, cached)
+            repo_structure = self._scan_repository_structure()
+            if repo_structure:
+                sections.append({
+                    'content': f"### Full Repository Structure\n{repo_structure}\n",
+                    'priority': 0.3,
+                    'name': 'repo_structure'
+                })
+
+            # Assemble with budget-aware prioritization
+            if sections:
+                selected = self._prioritize_context_sections(sections, max_context_size)
+                if selected:
+                    total_size = sum(len(s) for s in selected)
+                    logger.info(f"Built project context: {len(selected)} sections, ~{total_size} chars (budget: {max_context_size})")
+                    return "\n".join(selected)
+
         except Exception as e:
             logger.debug(f"Error building project context: {str(e)}")
-        
+
         return None

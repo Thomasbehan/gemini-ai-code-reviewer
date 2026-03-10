@@ -1221,7 +1221,9 @@ class TestContextBuilderFindReverseDependencies:
 
     def test_find_reverse_deps_exception_handling(self, context_builder):
         """Test that exceptions are handled gracefully."""
-        with patch('os.walk', side_effect=OSError("Access denied")):
+        with patch('os.listdir', side_effect=OSError("Access denied")):
+            # Force re-scan so the patched listdir is hit
+            context_builder._repo_scanned = False
             result = context_builder._find_reverse_dependencies("main.py")
             assert result == []
 
@@ -1359,7 +1361,10 @@ class TestContextBuilderFindConfigFiles:
 
     def test_find_config_files_no_repo(self, context_builder):
         """Test when repo doesn't exist."""
-        with patch('os.path.exists', return_value=False):
+        # Clear cached config files so the method re-scans
+        context_builder._cached_config_files = None
+        context_builder._repo_scanned = False
+        with patch('os.listdir', side_effect=OSError("Access denied")):
             result = context_builder._find_config_files()
             assert result == []
 

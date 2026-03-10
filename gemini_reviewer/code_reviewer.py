@@ -44,7 +44,10 @@ class CodeReviewer:
         self.github_client = GitHubClient(config.github)
         self.gemini_client = GeminiClient(config.gemini, config.review)
         self.diff_parser = DiffParser()
-        self.context_builder = ContextBuilder(self.github_client, self.diff_parser)
+        self.context_builder = ContextBuilder(
+            self.github_client, self.diff_parser,
+            project_context_budget=config.review.project_context_budget
+        )
         self.comment_processor = CommentProcessor(config.review, self.github_client)
         
         # Cache of existing AI comment signatures for this PR/session to avoid re-generating the same comments
@@ -424,14 +427,11 @@ class CodeReviewer:
         related_files = await self.context_builder.detect_related_files(diff_file, pr_details)
         project_context = await self.context_builder.build_project_context(diff_file, related_files, pr_details)
 
-        # Fetch full file content for better context
-        full_file_content = None
-        try:
-            full_file_content = self.github_client.get_file_content(
-                pr_details.owner, pr_details.repo, file_path, pr_details.head_sha or 'HEAD'
-            )
-        except Exception as e:
-            logger.debug(f"Could not fetch full file content for {file_path}: {e}")
+        # Fetch full file content via cache (same cache used by context_builder)
+        full_file_content = self.context_builder.get_cached_file_content(
+            pr_details.owner, pr_details.repo, file_path, pr_details.head_sha or 'HEAD'
+        )
+        if not full_file_content:
             # Fallback to local file if available
             try:
                 import os
