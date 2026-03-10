@@ -6,3 +6,27 @@ lib/**/*
 **/env
 **/venv
 **/.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Coverage
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Testing
+.pytest_cache/
+
+# Virtual environments
+.venv/
+
+# Build/packaging
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/

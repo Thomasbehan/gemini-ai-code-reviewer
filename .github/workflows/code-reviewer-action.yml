@@ -3,31 +3,62 @@ name: Gemini AI Code Reviewer
 on:
   issue_comment:
     types: [created]
-permissions: write-all
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
 jobs:
   gemini-code-review:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     if: |
       github.event.issue.pull_request &&
-      contains(github.event.comment.body, '/gemini-review')
+      (
+        contains(github.event.comment.body, '/review') ||
+        contains(github.event.comment.body, '/gemini-review')
+      )
     steps:
+      - name: Add eyes reaction to acknowledge trigger
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ github.event.comment.id }}
+          reactions: eyes
+
       - name: Checkout Repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
+          cache: 'pip'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
       - name: Run Gemini AI Code Reviewer
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          python3.10 review_code_gemini.py
+        run: python review_code_gemini.py
+
+      - name: Add success reaction
+        if: success()
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ github.event.comment.id }}
+          reactions: rocket
+
+      - name: Comment on failure
+        if: failure()
+        uses: peter-evans/create-or-update-comment@v4
+        with:
+          comment-id: ${{ github.event.comment.id }}
+          reactions: confused
+          body: |
+            :x: **Gemini Code Review failed.**
+            [View workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
