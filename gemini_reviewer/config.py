@@ -50,7 +50,7 @@ class GitHubConfig:
 class GeminiConfig:
     """Configuration for Gemini AI integration."""
     api_key: str
-    model_name: str = "gemini-2.5-flash"
+    model_name: str = "gemini-3-flash-preview"
     max_output_tokens: int = 8192
     temperature: float = 0.0  # Lower temperature for more precise, deterministic code reviews
     top_p: float = 0.9  # Slightly lower for more focused output
@@ -87,6 +87,10 @@ class ReviewConfig:
     # Comment caps (optional). 0 disables limits (default behavior).
     max_comments_total: int = 0
     max_comments_per_file: int = 0
+    # Tuning knobs (extracted from hardcoded values)
+    max_context_chars: int = 12000
+    position_window: int = 2
+    complexity_line_threshold: int = 2000
     
     def __post_init__(self):
         """Validate review configuration."""
@@ -159,7 +163,7 @@ class Config:
         # Gemini configuration  
         gemini_config = GeminiConfig(
             api_key=gemini_api_key,
-            model_name=get_env_str("GEMINI_MODEL", "gemini-2.5-flash"),
+            model_name=get_env_str("GEMINI_MODEL", "gemini-3-flash-preview"),
             temperature=get_env_float("GEMINI_TEMPERATURE", 0.0),
             top_p=get_env_float("GEMINI_TOP_P", 0.9),
             max_output_tokens=get_env_int("GEMINI_MAX_TOKENS", 8192)
@@ -186,7 +190,10 @@ class Config:
             custom_prompt_template=custom_prompt if custom_prompt else None,
             priority_threshold=priority_threshold,
             max_comments_total=get_env_int("MAX_COMMENTS_TOTAL", 0, "INPUT_MAX_COMMENTS_TOTAL"),
-            max_comments_per_file=get_env_int("MAX_COMMENTS_PER_FILE", 0, "INPUT_MAX_COMMENTS_PER_FILE")
+            max_comments_per_file=get_env_int("MAX_COMMENTS_PER_FILE", 0, "INPUT_MAX_COMMENTS_PER_FILE"),
+            max_context_chars=get_env_int("MAX_CONTEXT_CHARS", 12000),
+            position_window=get_env_int("POSITION_WINDOW", 2),
+            complexity_line_threshold=get_env_int("COMPLEXITY_LINE_THRESHOLD", 2000)
         )
         
         # Performance configuration

@@ -78,7 +78,7 @@ class TestGeminiConfig:
         """Test with valid API key."""
         config = GeminiConfig(api_key="AIzaSyTestKey123456")
         assert config.api_key == "AIzaSyTestKey123456"
-        assert config.model_name == "gemini-2.5-flash"
+        assert config.model_name == "gemini-3-flash-preview"
         assert config.temperature == 0.0
         assert config.top_p == 0.9
 
@@ -457,7 +457,7 @@ class TestConfig:
         assert "token" not in result["github"]
 
         # Check gemini section
-        assert result["gemini"]["model_name"] == "gemini-2.5-flash"
+        assert result["gemini"]["model_name"] == "gemini-3-flash-preview"
 
         # Check review section
         assert result["review"]["review_mode"] == "standard"

@@ -42,7 +42,7 @@ class CodeReviewer:
         
         # Initialize components
         self.github_client = GitHubClient(config.github)
-        self.gemini_client = GeminiClient(config.gemini)
+        self.gemini_client = GeminiClient(config.gemini, config.review)
         self.diff_parser = DiffParser()
         self.context_builder = ContextBuilder(self.github_client, self.diff_parser)
         self.comment_processor = CommentProcessor(config.review, self.github_client)
@@ -292,11 +292,8 @@ class CodeReviewer:
         for i, diff_file in enumerate(unique_files):
             logger.info(f"Analyzing file {i+1}/{len(unique_files)}: {diff_file.file_info.path}")
             # Track that we reviewed this file path during this run (used for resolution replies)
-            try:
-                self._current_review_file_paths.add(diff_file.file_info.path)
-            except Exception:
-                pass
-            
+            self._current_review_file_paths.add(diff_file.file_info.path)
+
             try:
                 file_comments = await self._analyze_single_file(diff_file, pr_details, unique_files)
                 all_comments.extend(file_comments)
@@ -310,11 +307,7 @@ class CodeReviewer:
                             f"({len(file_comments)} unresolved item(s))"
                         )
                         await self._post_followup_replies(pr_details, diff_file, file_comments)
-                        # Track this path as reviewed
-                        try:
-                            self._current_review_file_paths.add(diff_file.file_info.path)
-                        except Exception:
-                            pass
+                        self._current_review_file_paths.add(diff_file.file_info.path)
                     else:
                         logger.info(f"Posting review for file: {diff_file.file_info.path} with {len(file_comments)} comments")
                         await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
@@ -374,12 +367,8 @@ class CodeReviewer:
                     all_comments.extend(file_comments)
                     self.stats.files_processed += 1
                     
-                    # Track this path as reviewed
-                    try:
-                        self._current_review_file_paths.add(diff_file.file_info.path)
-                    except Exception:
-                        pass
-                    
+                    self._current_review_file_paths.add(diff_file.file_info.path)
+
                     logger.debug(
                         f"Completed analysis of {diff_file.file_info.path} (" 
                         f"{len(file_comments)} comments)"
@@ -450,8 +439,8 @@ class CodeReviewer:
                 if os.path.exists(local_path):
                     with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
                         full_file_content = f.read()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not read local fallback for {file_path}: {e}")
 
         # Gather list of all changed files and create a summary
         all_changed_files = []
@@ -508,7 +497,8 @@ class CodeReviewer:
                         # Preemptive duplicate avoidance: skip if this comment (path+body) matches an existing signature
                         try:
                             sig = self.github_client._compute_signature(comment.path, comment.body)
-                        except Exception:
+                        except Exception as e:
+                            logger.debug(f"Signature computation failed: {e}")
                             sig = None
                         if sig and sig in getattr(self, '_existing_comment_signatures', set()):
                             skipped_pre_existing += 1
@@ -516,11 +506,8 @@ class CodeReviewer:
                         else:
                             file_comments.append(comment)
                             # Update the session cache so we avoid emitting the same suggestion again later in this run
-                            try:
-                                if sig:
-                                    self._existing_comment_signatures.add(sig)
-                            except Exception:
-                                pass
+                            if sig:
+                                self._existing_comment_signatures.add(sig)
                 
             except GeminiClientError as e:
                 logger.warning(f"AI analysis failed for hunk {hunk_index+1} in {file_path}: {str(e)}")
@@ -699,7 +686,8 @@ class CodeReviewer:
                     ok = self.github_client.reply_to_comment(pr_details, int(cid), resolution_msg)
                     if ok:
                         resolved_count += 1
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Error resolving comment {cid}: {e}")
                     continue
             if considered > 0:
                 logger.info(f"Posted resolution replies on {resolved_count}/{considered} previous comment(s) for reviewed files.")
@@ -846,8 +834,8 @@ class CodeReviewer:
         try:
             rate_limit = self.github_client.check_rate_limit()
             github_stats = rate_limit.get('core', {})
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Could not fetch rate limit: {e}")
         
         return {
             'processing': {

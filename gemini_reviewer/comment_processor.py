@@ -116,8 +116,9 @@ class CommentProcessor:
 
             # Prefer commenting on added lines; if current is deletion-only, try to nudge to nearby added/context
             if hunk.lines[position - 1].startswith('-'):
-                # Look within a small window for a '+' or ' ' line
-                window = range(max(1, position - 2), min(len(hunk.lines), position + 2) + 1)
+                # Look within a configurable window for a '+' or ' ' line
+                pos_window = getattr(self.review_config, 'position_window', 2)
+                window = range(max(1, position - pos_window), min(len(hunk.lines), position + pos_window) + 1)
                 preferred = None
                 for i in window:
                     if hunk.lines[i - 1].startswith('+'):
@@ -207,7 +208,8 @@ class CommentProcessor:
                 line_number=file_line_number,
                 priority=ai_response.priority,
                 category=ai_response.category,
-                suggestion=getattr(ai_response, 'fix_code', None)
+                suggestion=getattr(ai_response, 'fix_code', None),
+                confidence=getattr(ai_response, 'confidence', None)
             )
             return comment
 
@@ -282,30 +284,37 @@ class CommentProcessor:
         for cm in comments:
             by_file.setdefault(cm.path, []).append(cm)
         
-        # For determinism, within each file, sort by priority (desc) but keep stable original order for ties
+        # Composite score: priority weight * 4 + confidence * 2
+        # Never drop comments with confidence >= 0.95
         def sort_key(cm: ReviewComment):
-            return (-priority_order.get(cm.priority, 1))
+            confidence = getattr(cm, 'confidence', None) or 0.5
+            return -(priority_order.get(cm.priority, 1) * 4 + confidence * 2)
         
         selected: List[ReviewComment] = []
         dropped_due_to_file_cap = 0
         for path, group in by_file.items():
             if per_file_cap > 0 and len(group) > per_file_cap:
                 sorted_group = sorted(group, key=sort_key)
-                kept = sorted_group[:per_file_cap]
+                # Never drop high-confidence comments (>= 0.95)
+                high_conf = [cm for cm in sorted_group if (getattr(cm, 'confidence', None) or 0) >= 0.95]
+                rest = [cm for cm in sorted_group if (getattr(cm, 'confidence', None) or 0) < 0.95]
+                kept = high_conf + rest[:max(0, per_file_cap - len(high_conf))]
                 dropped_due_to_file_cap += len(group) - len(kept)
                 selected.extend(kept)
             else:
                 selected.extend(sorted(group, key=sort_key))
-        
+
         if dropped_due_to_file_cap:
             logger.info(f"Applied per-file cap: dropped {dropped_due_to_file_cap} comments exceeding {per_file_cap}/file")
-        
+
         # Apply total cap across all files
         if total_cap > 0 and len(selected) > total_cap:
-            # Sort globally by priority, stable among equals by original relative order (already grouped)
             selected_sorted = sorted(selected, key=sort_key)
-            limited = selected_sorted[:total_cap]
+            # Never drop high-confidence comments
+            high_conf = [cm for cm in selected_sorted if (getattr(cm, 'confidence', None) or 0) >= 0.95]
+            rest = [cm for cm in selected_sorted if (getattr(cm, 'confidence', None) or 0) < 0.95]
+            limited = high_conf + rest[:max(0, total_cap - len(high_conf))]
             logger.info(f"Applied total cap: reduced {len(selected)} to {len(limited)} comments (cap={total_cap})")
             return limited
-        
+
         return selected

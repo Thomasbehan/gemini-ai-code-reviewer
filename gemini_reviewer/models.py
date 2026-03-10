@@ -107,7 +107,8 @@ class ReviewComment:
     priority: ReviewPriority = ReviewPriority.MEDIUM
     category: Optional[str] = None
     suggestion: Optional[str] = None
-    
+    confidence: Optional[float] = None
+
     def to_github_comment(self) -> Dict[str, Any]:
         """Convert to GitHub API format."""
         return {

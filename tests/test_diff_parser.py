@@ -304,7 +304,12 @@ class TestFilterLargeHunks:
         result = parser.filter_large_hunks([diff_file], max_lines_per_hunk=100)
 
         assert len(result) == 1
-        assert len(result[0].hunks[0].lines) == 100
+        truncated_hunk = result[0].hunks[0]
+        # New strategy: first 40% (40) + separator (1) + last 20% (20) = 61
+        assert len(truncated_hunk.lines) == 61
+        assert truncated_hunk.lines[0] == "+line0"           # head preserved
+        assert "omitted" in truncated_hunk.lines[40]         # separator in the middle
+        assert truncated_hunk.lines[-1] == "+line599"        # tail preserved
 
     def test_limit_hunks_per_file(self):
         """Test limiting number of hunks per file."""

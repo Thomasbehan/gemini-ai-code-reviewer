@@ -34,12 +34,18 @@ class DiffParser:
         
         logger.debug("Initialized diff parser")
     
+    MAX_DIFF_SIZE = 10_000_000  # 10MB
+
     def parse_diff(self, diff_content: str) -> List[DiffFile]:
         """Parse diff content into structured DiffFile objects."""
         if not diff_content or not isinstance(diff_content, str):
             logger.warning("Empty or invalid diff content provided")
             return []
-        
+
+        if len(diff_content) > self.MAX_DIFF_SIZE:
+            logger.error(f"Diff too large ({len(diff_content)} bytes), max is {self.MAX_DIFF_SIZE}")
+            raise DiffParsingError(f"Diff exceeds maximum size of {self.MAX_DIFF_SIZE} bytes")
+
         logger.info(f"Parsing diff content (length: {len(diff_content)} characters)")
         
         try:
@@ -133,6 +139,11 @@ class DiffParser:
             # Skip binary files
             if file_info.is_binary:
                 logger.debug(f"⚠️ Skipping binary file: {file_path}")
+                return None
+
+            # Skip deleted files — nothing to review
+            if patched_file.is_removed_file:
+                logger.debug(f"Skipping deleted file: {file_path}")
                 return None
             
             # Convert hunks
@@ -336,6 +347,11 @@ class DiffParser:
             if diff_file.file_info.is_binary:
                 logger.debug(f"Skipping binary file: {file_path}")
                 continue
+
+            # Skip deleted files
+            if diff_file.file_info.is_deleted_file:
+                logger.debug(f"Skipping deleted file: {file_path}")
+                continue
             
             filtered_files.append(diff_file)
             
@@ -363,18 +379,24 @@ class DiffParser:
             for hunk in diff_file.hunks[:max_hunks_per_file]:  # Limit hunks per file
                 if len(hunk.lines) > max_lines_per_hunk:
                     logger.debug(f"Truncating large hunk in {diff_file.file_info.path} "
-                               f"({len(hunk.lines)} -> {max_lines_per_hunk} lines)")
-                    
-                    # Truncate hunk
-                    truncated_lines = hunk.lines[:max_lines_per_hunk]
+                               f"({len(hunk.lines)} -> ~{max_lines_per_hunk} lines)")
+
+                    # Keep first 40% and last 20% to preserve signatures + closing logic
+                    head_count = int(max_lines_per_hunk * 0.4)
+                    tail_count = int(max_lines_per_hunk * 0.2)
+                    head_lines = hunk.lines[:head_count]
+                    tail_lines = hunk.lines[-tail_count:] if tail_count > 0 else []
+                    middle_count = len(hunk.lines) - head_count - tail_count
+                    separator = [f"... [{middle_count} lines omitted] ..."]
+                    truncated_lines = head_lines + separator + tail_lines
                     truncated_content = '\n'.join(truncated_lines)
-                    
+
                     truncated_hunk = HunkInfo(
                         source_start=hunk.source_start,
                         source_length=min(hunk.source_length, max_lines_per_hunk),
                         target_start=hunk.target_start,
                         target_length=min(hunk.target_length, max_lines_per_hunk),
-                        content=truncated_content + '\n...[truncated]',
+                        content=truncated_content,
                         header=hunk.header,
                         lines=truncated_lines
                     )
@@ -409,19 +431,19 @@ class DiffParser:
         self._total_deletions = 0
     
     @staticmethod
-    def analyze_diff_complexity(diff_files: List[DiffFile]) -> Dict[str, Any]:
+    def analyze_diff_complexity(diff_files: List[DiffFile], complexity_line_threshold: int = 2000) -> Dict[str, Any]:
         """Analyze the complexity of the diff for processing decisions."""
         if not diff_files:
             return {'complexity': 'none', 'total_files': 0}
-        
+
         total_files = len(diff_files)
         total_hunks = sum(len(df.hunks) for df in diff_files)
         total_lines = sum(len(hunk.lines) for df in diff_files for hunk in df.hunks)
-        
+
         # Categorize complexity
-        if total_files > 20 or total_lines > 2000:
+        if total_files > 20 or total_lines > complexity_line_threshold:
             complexity = 'high'
-        elif total_files > 10 or total_lines > 1000:
+        elif total_files > 10 or total_lines > complexity_line_threshold // 2:
             complexity = 'medium'
         else:
             complexity = 'low'

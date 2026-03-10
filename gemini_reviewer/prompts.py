@@ -46,7 +46,12 @@ STRICT OUTPUT RULES:
 
 SCOPE: Report ONLY issues that must be fixed (critical/serious):
 - Bugs & Logic Errors
-- Security Issues
+- Security Issues — always check for:
+  * SQL injection, command injection, XSS, SSRF, XXE
+  * Hardcoded secrets or credentials
+  * Unsafe deserialization (pickle, eval, exec, yaml.load without SafeLoader)
+  * Weak cryptography or insufficient authentication/authorization checks
+  * Path traversal, open redirects
 - Performance Problems
 - Error Handling failures
 - Resource Management (leaks/unclosed handles)

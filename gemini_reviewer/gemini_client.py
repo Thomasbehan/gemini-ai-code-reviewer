@@ -13,7 +13,7 @@ from typing import List, Dict, Any, Optional
 import google.generativeai as genai
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from .config import GeminiConfig, ReviewMode
+from .config import GeminiConfig, ReviewConfig, ReviewMode
 from .models import AIResponse, ReviewPriority, AnalysisContext, HunkInfo, PRDetails
 from .utils import get_file_language, sanitize_text, sanitize_code_content
 
@@ -39,9 +39,10 @@ class TokenLimitExceededError(GeminiClientError):
 class GeminiClient:
     """Gemini AI client with retry logic and comprehensive error handling."""
     
-    def __init__(self, config: GeminiConfig):
+    def __init__(self, config: GeminiConfig, review_config: Optional['ReviewConfig'] = None):
         """Initialize Gemini client with configuration."""
         self.config = config
+        self.review_config = review_config
         
         try:
             genai.configure(api_key=config.api_key)
@@ -89,10 +90,19 @@ class GeminiClient:
         
         try:
             prompt = self._create_analysis_prompt(hunk, context, prompt_template)
-            
+
             if len(prompt) > self.config.max_prompt_length:
-                logger.warning(f"Prompt too long ({len(prompt)} chars), truncating...")
-                prompt = prompt[:self.config.max_prompt_length] + "...[truncated]"
+                # Truncate full_file_content first (largest contributor) to preserve diff and instructions
+                overshoot = len(prompt) - self.config.max_prompt_length
+                if context.full_file_content and len(context.full_file_content) > overshoot + 500:
+                    truncated_file = context.full_file_content[:len(context.full_file_content) - overshoot - 200]
+                    truncated_file += "\n... (truncated to fit prompt limit)"
+                    context.full_file_content = truncated_file
+                    prompt = self._create_analysis_prompt(hunk, context, prompt_template)
+                    logger.warning(f"Truncated full_file_content to fit prompt limit ({len(prompt)} chars)")
+                else:
+                    logger.warning(f"Prompt too long ({len(prompt)} chars), hard-truncating...")
+                    prompt = prompt[:self.config.max_prompt_length] + "...[truncated]"
             
             logger.debug(f"Analyzing hunk with {len(hunk.content)} characters of content")
             logger.debug(f"Prompt preview: {prompt[:200]}...")
@@ -132,9 +142,13 @@ class GeminiClient:
                     logger.warning(f"Gemini API response filtered due to {reason_name} settings (finish_reason={finish_reason}). "
                                  "This is expected for some code patterns and does not indicate an error. "
                                  "Returning empty review for this hunk.")
-                    # Return empty JSON array to indicate no reviews for this hunk
                     return "[]"
-                
+
+                # If response was truncated (MAX_TOKENS), log warning but let partial text through
+                # so existing recovery logic (_recover_json_list_from_objects, _repair_truncated_json) can handle it
+                if finish_reason == 2:  # MAX_TOKENS
+                    logger.warning("Response truncated due to max_output_tokens limit — attempting partial parse")
+
                 # Check if there are valid parts in the response
                 if not hasattr(candidate, 'content') or not candidate.content or not candidate.content.parts:
                     logger.warning(f"Response has no valid parts (finish_reason={finish_reason}). Returning empty review.")
@@ -158,8 +172,8 @@ class GeminiClient:
                     tokens_used = response.usage_metadata.total_token_count
                     self._total_tokens_used += tokens_used
                     logger.debug(f"Tokens used: {tokens_used}")
-                except Exception:
-                    pass  # Token counting not critical
+                except (AttributeError, TypeError) as e:
+                    logger.debug(f"Token counting unavailable: {e}")
             
             return response_text
             
@@ -260,7 +274,7 @@ class GeminiClient:
         if context.full_file_content:
             # Truncate if too long, but include key parts
             full_content = context.full_file_content
-            max_file_content = 12000  # Characters
+            max_file_content = (self.review_config.max_context_chars if self.review_config else 12000)
             if len(full_content) > max_file_content:
                 # Include beginning (imports, class definitions) and truncate middle
                 full_content = full_content[:max_file_content] + "\n... (truncated, full file is larger)"
@@ -442,7 +456,7 @@ class GeminiClient:
                         # Sometimes it can be 1-based index in string form
                         line_number = int(str(ln_val).strip())
                         break
-                    except Exception:
+                    except (ValueError, TypeError):
                         continue
             if not line_number or line_number <= 0:
                 logger.warning(f"Review missing or invalid line number field: keys tried {line_keys}; review keys: {list(review.keys())}")
@@ -529,7 +543,7 @@ class GeminiClient:
                     c = float(confidence_val)
                     if c > 1.0 and c <= 100.0:
                         confidence = max(0.0, min(1.0, c / 100.0))
-                except Exception:
+                except (ValueError, TypeError):
                     pass
             
             return AIResponse(
