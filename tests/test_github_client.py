@@ -1575,6 +1575,80 @@ class TestGitHubClientDiffExceptions:
             client.get_pr_diff("owner", "repo", 123)
 
 
+class TestGetPrDiff406Fallback:
+    """Tests for get_pr_diff 406 fallback to PR files API."""
+
+    @pytest.fixture
+    def valid_config(self):
+        """Create a valid GitHubConfig."""
+        return GitHubConfig(token="ghp_test123456789012")
+
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_get_pr_diff_406_falls_back_to_files_api(
+        self, mock_session, mock_github, valid_config
+    ):
+        """Test that 406 from .diff endpoint falls back to PR files API."""
+        mock_response = Mock()
+        mock_response.status_code = 406
+        mock_response.text = "Not Acceptable"
+        mock_session.return_value.get.return_value = mock_response
+
+        # Set up PR files for the fallback
+        mock_file = Mock()
+        mock_file.patch = "@@ -0,0 +1,3 @@\n+line1\n+line2\n+line3"
+        mock_file.status = "added"
+        mock_file.filename = "src/new_file.py"
+        mock_file.previous_filename = None
+
+        mock_pr = Mock()
+        mock_pr.get_files.return_value = [mock_file]
+        mock_repo = Mock()
+        mock_repo.get_pull.return_value = mock_pr
+        mock_github.return_value.get_repo.return_value = mock_repo
+
+        client = GitHubClient(valid_config)
+        result = client.get_pr_diff("owner", "repo", 123)
+
+        assert "diff --git a/src/new_file.py b/src/new_file.py" in result
+        assert "+line1" in result
+
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_get_pr_diff_406_fallback_skips_binary_files(
+        self, mock_session, mock_github, valid_config
+    ):
+        """Test that binary files (no patch) are skipped in the fallback."""
+        mock_response = Mock()
+        mock_response.status_code = 406
+        mock_response.text = "Not Acceptable"
+        mock_session.return_value.get.return_value = mock_response
+
+        mock_text_file = Mock()
+        mock_text_file.patch = "@@ -1,1 +1,2 @@\n line1\n+line2"
+        mock_text_file.status = "modified"
+        mock_text_file.filename = "src/app.py"
+        mock_text_file.previous_filename = None
+
+        mock_binary_file = Mock()
+        mock_binary_file.patch = None  # binary files have no patch
+        mock_binary_file.status = "added"
+        mock_binary_file.filename = "tests/baseline.png"
+        mock_binary_file.previous_filename = None
+
+        mock_pr = Mock()
+        mock_pr.get_files.return_value = [mock_text_file, mock_binary_file]
+        mock_repo = Mock()
+        mock_repo.get_pull.return_value = mock_pr
+        mock_github.return_value.get_repo.return_value = mock_repo
+
+        client = GitHubClient(valid_config)
+        result = client.get_pr_diff("owner", "repo", 123)
+
+        assert "src/app.py" in result
+        assert "baseline.png" not in result
+
+
 class TestGitHubClientCommentReplies:
     """Tests for get_comment_replies functionality."""
 

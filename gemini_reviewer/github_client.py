@@ -14,7 +14,7 @@ import os
 from typing import List, Dict, Any, Optional, Set
 import difflib
 from github import Github
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
 
 from .config import GitHubConfig
 from .models import PRDetails, ReviewComment, ReviewResult
@@ -35,6 +35,11 @@ class PRNotFoundError(GitHubClientError):
 
 class RateLimitError(GitHubClientError):
     """Exception raised when GitHub API rate limit is exceeded."""
+    pass
+
+
+class DiffTooLargeError(GitHubClientError):
+    """Exception raised when the diff is too large for the .diff endpoint (406)."""
     pass
 
 
@@ -157,53 +162,121 @@ class GitHubClient:
         wait=wait_exponential(multiplier=1, min=4, max=10),
         retry=retry_if_exception_type((requests.exceptions.RequestException, requests.exceptions.Timeout))
     )
+    def _fetch_diff_via_api(self, repo_name: str, pull_number: int) -> str:
+        """Fetch diff via the .diff endpoint. Raises on non-200 responses."""
+        api_url = f"{self.config.api_base_url}/repos/{repo_name}/pulls/{pull_number}.diff"
+        diff_headers = {'Accept': 'application/vnd.github.v3.diff'}
+
+        logger.debug(f"Making diff API request to: {api_url}")
+        response = self._session.get(api_url, headers=diff_headers, timeout=self.config.timeout)
+
+        if response.status_code == 200:
+            return response.text
+        elif response.status_code == 404:
+            raise PRNotFoundError(f"PR #{pull_number} not found in {repo_name}")
+        elif response.status_code == 403:
+            if "rate limit" in response.text.lower():
+                raise RateLimitError("GitHub API rate limit exceeded")
+            else:
+                raise GitHubClientError("Access forbidden - check GitHub token permissions")
+        elif response.status_code == 406:
+            raise DiffTooLargeError(
+                f"Diff too large for .diff endpoint (406 Not Acceptable)"
+            )
+        else:
+            logger.error(f"Failed to get diff. Status code: {response.status_code}")
+            response.raise_for_status()
+            return ""
+
+    def _build_diff_from_pr_files(self, repo_name: str, pull_number: int) -> str:
+        """Fallback: build a unified diff from the PR files API (paginated)."""
+        logger.info(f"Building diff from PR files API for {repo_name} PR#{pull_number}")
+        repo_obj = self._get_repo_with_retry(repo_name)
+        pr = self._get_pr_with_retry(repo_obj, pull_number)
+
+        parts: List[str] = []
+        for f in pr.get_files():
+            patch = getattr(f, 'patch', None)
+            status = getattr(f, 'status', '') or ''
+            filename = getattr(f, 'filename', '') or ''
+            prev = getattr(f, 'previous_filename', None)
+            # Skip binary files (patch is None)
+            if not patch or not filename:
+                continue
+            if status == 'added':
+                diff_header = f"diff --git a/{filename} b/{filename}\n"
+                from_header = "--- /dev/null\n"
+                to_header = f"+++ b/{filename}\n"
+            elif status == 'removed':
+                diff_header = f"diff --git a/{filename} b/{filename}\n"
+                from_header = f"--- a/{filename}\n"
+                to_header = "+++ /dev/null\n"
+            elif status == 'renamed' and prev:
+                diff_header = f"diff --git a/{prev} b/{filename}\n"
+                from_header = f"--- a/{prev}\n"
+                to_header = f"+++ b/{filename}\n"
+            else:
+                diff_header = f"diff --git a/{filename} b/{filename}\n"
+                from_header = f"--- a/{filename}\n"
+                to_header = f"+++ b/{filename}\n"
+            parts.append(diff_header + from_header + to_header + patch + "\n")
+
+        combined = "".join(parts)
+        logger.info(f"Built diff from PR files API with {len(parts)} file patch(es)")
+        return combined
+
     def get_pr_diff(self, owner: str, repo: str, pull_number: int) -> str:
-        """Fetch the diff of a pull request with retry logic."""
+        """Fetch the diff of a pull request.
+
+        Primary: .diff endpoint. Fallback: PR files API (handles large diffs
+        that return 406 from the .diff endpoint).
+        """
         # Validate inputs
         if not all([owner, repo, pull_number]):
             logger.error("Invalid parameters provided to get_pr_diff")
             raise GitHubClientError("Invalid parameters")
-        
+
         if not isinstance(pull_number, int) or pull_number <= 0:
             logger.error(f"Invalid pull request number: {pull_number}")
             raise GitHubClientError(f"Invalid pull request number: {pull_number}")
-        
+
         repo_name = f"{self._sanitize_input(owner)}/{self._sanitize_input(repo)}"
         logger.info(f"Fetching diff for: {repo_name} PR#{pull_number}")
-        
+
         try:
             # Verify PR exists first
             repo_obj = self._get_repo_with_retry(repo_name)
-            pr = self._get_pr_with_retry(repo_obj, pull_number)
-            
-            # Use direct API call for diff
-            api_url = f"{self.config.api_base_url}/repos/{repo_name}/pulls/{pull_number}.diff"
-            
-            # Override Accept header to specifically request diff format
-            diff_headers = {
-                'Accept': 'application/vnd.github.v3.diff'
-            }
-            
-            logger.debug(f"Making diff API request to: {api_url}")
-            response = self._session.get(api_url, headers=diff_headers, timeout=self.config.timeout)
-            
-            if response.status_code == 200:
-                diff = response.text
-                logger.info(f"Successfully retrieved diff (length: {len(diff)} characters)")
-                return diff
-            elif response.status_code == 404:
-                raise PRNotFoundError(f"PR #{pull_number} not found in {repo_name}")
-            elif response.status_code == 403:
-                if "rate limit" in response.text.lower():
-                    raise RateLimitError("GitHub API rate limit exceeded")
-                else:
-                    raise GitHubClientError("Access forbidden - check GitHub token permissions")
-            else:
-                logger.error(f"Failed to get diff. Status code: {response.status_code}")
-                logger.debug(f"Response content: {response.text[:500]}...")
-                response.raise_for_status()  # This will trigger retry
-                return ""
-        
+            self._get_pr_with_retry(repo_obj, pull_number)
+
+            diff = self._fetch_diff_via_api(repo_name, pull_number)
+            logger.info(f"Successfully retrieved diff (length: {len(diff)} characters)")
+            return diff
+
+        except DiffTooLargeError:
+            logger.warning("Diff endpoint returned 406 (too large); falling back to PR files API")
+            try:
+                return self._build_diff_from_pr_files(repo_name, pull_number)
+            except Exception as fallback_err:
+                logger.error(f"PR files API fallback also failed: {fallback_err}")
+                raise GitHubClientError(f"Failed to fetch diff via both .diff and files API: {fallback_err}")
+        except RetryError as e:
+            # Unwrap the original exception from tenacity's RetryError
+            original = e.last_attempt.exception() if e.last_attempt else None
+            if isinstance(original, DiffTooLargeError):
+                logger.warning("Diff endpoint returned 406 (too large); falling back to PR files API")
+                try:
+                    return self._build_diff_from_pr_files(repo_name, pull_number)
+                except Exception as fallback_err:
+                    logger.error(f"PR files API fallback also failed: {fallback_err}")
+                    raise GitHubClientError(f"Failed to fetch diff via both .diff and files API: {fallback_err}")
+            if isinstance(original, requests.exceptions.Timeout):
+                logger.error("Request timed out while fetching diff")
+                raise original from e
+            if isinstance(original, requests.exceptions.RequestException):
+                logger.error(f"Request failed while fetching diff: {str(original)}")
+                raise original from e
+            logger.error(f"Unexpected error while fetching diff: {str(e)}")
+            raise GitHubClientError(f"Failed to fetch diff: {str(e)}")
         except requests.exceptions.Timeout:
             logger.error("Request timed out while fetching diff")
             raise
