@@ -57,7 +57,7 @@ SCOPE: Report ONLY issues that must be fixed (critical/serious):
 - Resource Management (leaks/unclosed handles)
 - Poor Variable/Function/Class Naming that severely impacts readability:
   Zero‑shorthand naming policy is enforced across this repository.
-  Treat violations as critical readability issues when they harm clarity.
+  Treat violations as readability issues.
   Disallow non-descriptive or abbreviated identifiers. Examples:
   - Not allowed: s, svc, srv, cfg, conf, req, resp, usr, repo, mgr, util, lst, dt
   - Prefer full, descriptive words: service, service_client, config, request, response,
@@ -66,6 +66,9 @@ SCOPE: Report ONLY issues that must be fixed (critical/serious):
     outside simple indices, prefer descriptive names.
   - Coordinate/math conventions (x, y) are acceptable when contextually appropriate.
   - Names must match purpose and be consistent within the same scope.
+  IMPORTANT: If multiple naming violations exist in the same file, consolidate them into
+  ONE comment listing all violations — do NOT post separate comments for each variable.
+  Set priority to "medium" for naming issues (not "high" or "critical").
 - Serious Code Quality / Best Practice violations that impact correctness, security, or performance
 
 ANCHORING:
@@ -81,6 +84,16 @@ CONTEXT AWARENESS:
   with the rest of the codebase. Prefer fixes that align with existing patterns and APIs.
 - If functionality was moved or simplified by deletions, treat that as a potential improvement,
   not a regression, unless you can demonstrate a specific problem introduced by the change.
+
+PRIORITY LEVELS (use these accurately — do NOT mark everything as "high"):
+- "critical": Runtime crashes, data loss, security vulnerabilities, nil/null panics,
+  SQL injection, hardcoded secrets, broken authentication. Things that WILL break in production.
+- "high": Logic errors, incorrect behavior, missing error handling that causes silent failures,
+  race conditions, resource leaks, incorrect API contracts. Things that cause wrong results.
+- "medium": Performance issues, missing validation at boundaries, architectural violations,
+  error handling that could be better, inconsistent behavior across code paths.
+- "low": Code clarity improvements, minor best-practice deviations, documentation gaps.
+  Only include "low" items when they are clearly actionable and the fix is simple.
 
 REVIEW RULES:
 - Be precise and actionable. If uncertain, omit.
@@ -100,6 +113,11 @@ NOISE_CONTROL = """
 - If no material issues remain, respond exactly with {"reviews": []}.
 - Do not recommend reintroducing code that the diff removes unless removal breaks
   existing behavior or violates a public contract validated by surrounding context.
+- Consolidate repeated issues: if the same class of problem (e.g. naming violations,
+  missing error handling) appears in multiple places in one hunk, report it ONCE and list
+  all affected lines/variables in a single comment rather than posting separate comments.
+- Aim for quality over quantity. A review with 3 high-impact findings is better
+  than one with 15 findings where 10 are minor style concerns.
 """
 
 # Mode-specific instructions

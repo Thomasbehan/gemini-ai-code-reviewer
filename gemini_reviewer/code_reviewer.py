@@ -60,6 +60,7 @@ class CodeReviewer:
         # Track unresolved previous comment IDs detected during follow-up and files reviewed in this run
         self._unresolved_prior_ids: Set[int] = set()
         self._current_review_file_paths: Set[str] = set()
+        self._replied_to_comment_ids: Set[int] = set()  # Prevent duplicate follow-up replies per run
         
         # Statistics tracking
         self.stats = ProcessingStats(start_time=time.time())
@@ -69,27 +70,35 @@ class CodeReviewer:
     async def review_pull_request(self, event_path: str) -> ReviewResult:
         """Main entry point for reviewing a pull request."""
         logger.info("=== Starting Pull Request Review ===")
-        
+
+        # Check if this is a command-triggered fresh review (/gemini-review or /review)
+        import os as _os
+        self._force_fresh_review = _os.environ.get("FORCE_FRESH_REVIEW", "").lower() == "true"
+        if self._force_fresh_review:
+            logger.info("🔄 COMMAND-TRIGGERED FRESH REVIEW: Skipping incremental diff and follow-up mode.")
+
         try:
             # Extract PR details from GitHub event
             pr_details = self.github_client.get_pr_details_from_event(event_path)
             logger.info(f"Reviewing PR #{pr_details.pull_number}: {pr_details.title}")
-            
+
             # Load existing AI comment signatures so we can avoid re-generating the same comments
+            # For fresh reviews, we still deduplicate to avoid posting identical comments
             try:
                 self._existing_comment_signatures = self.github_client.get_existing_comment_signatures(pr_details)
                 logger.info(f"Loaded {len(self._existing_comment_signatures)} existing AI comment signatures for duplicate avoidance during analysis")
             except Exception as _e:
                 logger.debug(f"Could not load existing comment signatures prior to analysis: {_e}")
                 self._existing_comment_signatures = set()
-            
+
             # Fetch existing bot comments to determine if this is a follow-up review
+            # Command-triggered reviews always do a fresh review (never follow-up)
             try:
                 existing_bot_comments = self.github_client.get_existing_bot_comments(pr_details)
                 # Reset tracking for this run
                 self._unresolved_prior_ids = set()
                 self._current_review_file_paths = set()
-                if existing_bot_comments:
+                if existing_bot_comments and not self._force_fresh_review:
                     self._is_followup_review = True
                     # Format previous comments for the AI and store ID mapping
                     formatted_comments = []
@@ -200,9 +209,19 @@ class CodeReviewer:
     async def _get_pr_diff(self, pr_details: PRDetails) -> str:
         """Get PR diff with error handling. If the PR has previous AI review activity by this bot,
         only fetch and review changes introduced since the last reviewed commit to avoid duplicate or stale comments.
+        For command-triggered reviews (/gemini-review, /review), always fetch the full diff.
         """
         try:
             logger.info("Fetching PR diff...")
+            # For command-triggered fresh reviews, skip incremental logic entirely
+            if getattr(self, '_force_fresh_review', False):
+                logger.info("Fresh review requested — fetching full PR diff.")
+                diff_content = self.github_client.get_pr_diff(
+                    pr_details.owner, pr_details.repo, pr_details.pull_number
+                )
+                logger.debug(f"Retrieved full diff with {len(diff_content)} characters")
+                return diff_content
+
             # Try to limit scope to new commits since last AI review
             since_sha = self.github_client.get_last_reviewed_commit_sha(pr_details)
             incremental_diff = None
@@ -529,11 +548,17 @@ class CodeReviewer:
         1) If the body references a "Previous issue: ...", reply to the prior bot comment whose body best matches that text.
         2) Otherwise, choose the prior bot comment on the same path with nearest diff position (fallback to nearest line number).
         3) As a last resort, reply to the most recent prior bot comment on the same path.
+
+        Each prior comment receives at most ONE follow-up reply per review run to prevent duplicate spam.
         """
         try:
             if not getattr(self, '_previous_bot_comments', None):
                 logger.debug("No previous bot comments available to reply to.")
                 return
+
+            # Track which prior comment IDs have already received a reply in this run
+            if not hasattr(self, '_replied_to_comment_ids'):
+                self._replied_to_comment_ids: Set[int] = set()
             path = diff_file.file_info.path
             prior_for_path = [c for c in self._previous_bot_comments if c.get('path') == path and c.get('id')]
             if not prior_for_path:
@@ -632,8 +657,20 @@ class CodeReviewer:
                 target_comment_id = best.get('id') if best else None
                 if not target_comment_id:
                     continue
+
+                # Prevent replying to the same prior comment more than once per run
+                try:
+                    tid = int(target_comment_id)
+                except (TypeError, ValueError):
+                    tid = target_comment_id
+                if tid in self._replied_to_comment_ids:
+                    logger.debug(f"Skipping duplicate follow-up reply to comment {tid}")
+                    continue
+
                 # Post the follow-up reply to the matched previous comment
                 self.github_client.reply_to_comment(pr_details, target_comment_id, body)
+                self._replied_to_comment_ids.add(tid)
+
                 # Track unresolved only if the follow-up indicates not resolved
                 try:
                     txt = (body or '').lower()

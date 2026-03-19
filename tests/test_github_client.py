@@ -910,6 +910,7 @@ class TestGitHubClientExistingComments:
         mock_comment.original_position = 5
         mock_comment.created_at = "2024-01-01"
         mock_comment.id = 123
+        mock_comment.in_reply_to_id = None  # Root comment, not a reply
         mock_comment.user.login = "github-actions[bot]"
 
         mock_pr = Mock()
@@ -2621,3 +2622,115 @@ class TestGitHubClientExistingBotComments:
 
         # Should handle exception gracefully
         assert result == []
+
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_get_existing_bot_comments_filters_replies(
+        self, mock_session, mock_github, valid_config, sample_pr_details
+    ):
+        """Test that reply comments (in_reply_to_id set) are filtered out but root comments are kept."""
+        # Root bot comment (should be included)
+        root_comment = Mock()
+        root_comment.path = "file.py"
+        root_comment.body = "Bug found <!-- AI-SIG:abc123 -->"
+        root_comment.original_line = 10
+        root_comment.position = 5
+        root_comment.original_position = 5
+        root_comment.created_at = "2024-01-01"
+        root_comment.id = 100
+        root_comment.in_reply_to_id = None
+        root_comment.user.login = "github-actions[bot]"
+
+        # Follow-up reply from bot (should be filtered — it's a reply, not an original finding)
+        followup_reply = Mock()
+        followup_reply.path = "file.py"
+        followup_reply.body = "Previous issue: Bug found. Status: Not Resolved <!-- AI-SIG:def456 -->"
+        followup_reply.original_line = 10
+        followup_reply.position = 5
+        followup_reply.original_position = 5
+        followup_reply.created_at = "2024-01-02"
+        followup_reply.id = 101
+        followup_reply.in_reply_to_id = 100  # Reply to root comment
+        followup_reply.user.login = "github-actions[bot]"
+
+        # Resolution reply from bot (should be filtered — it's a reply)
+        resolution_reply = Mock()
+        resolution_reply.path = "file.py"
+        resolution_reply.body = "✅ This has been fixed thank you"
+        resolution_reply.original_line = 10
+        resolution_reply.position = 5
+        resolution_reply.original_position = 5
+        resolution_reply.created_at = "2024-01-03"
+        resolution_reply.id = 102
+        resolution_reply.in_reply_to_id = 100  # Reply to root comment
+        resolution_reply.user.login = "github-actions[bot]"
+
+        # Second root bot comment (should be included even though body mentions resolution)
+        root_comment_2 = Mock()
+        root_comment_2.path = "other.py"
+        root_comment_2.body = "Missing error handling <!-- AI-SIG:ghi789 -->"
+        root_comment_2.original_line = 20
+        root_comment_2.position = 15
+        root_comment_2.original_position = 15
+        root_comment_2.created_at = "2024-01-01"
+        root_comment_2.id = 200
+        root_comment_2.in_reply_to_id = None
+        root_comment_2.user.login = "github-actions[bot]"
+
+        mock_pr = Mock()
+        mock_pr.get_review_comments.return_value = [
+            root_comment, followup_reply, resolution_reply, root_comment_2
+        ]
+        mock_repo = Mock()
+        mock_repo.get_pull.return_value = mock_pr
+        mock_github.return_value.get_repo.return_value = mock_repo
+        mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+
+        client = GitHubClient(valid_config)
+        result = client.get_existing_bot_comments(sample_pr_details)
+
+        # Both root comments kept, both replies filtered out
+        assert len(result) == 2
+        result_ids = {r['id'] for r in result}
+        assert result_ids == {100, 200}
+
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_review_summary_includes_executive_summary(
+        self, mock_session, mock_github, valid_config
+    ):
+        """Test that review summary includes key findings for critical/high comments."""
+        client = GitHubClient(valid_config)
+
+        comments = [
+            ReviewComment(
+                body="Hardcoded secret found in source code",
+                path="src/config/secrets.py",
+                position=5,
+                priority=ReviewPriority.CRITICAL,
+                category="security"
+            ),
+            ReviewComment(
+                body="Missing null check causes panic",
+                path="src/handlers/api.go",
+                position=10,
+                priority=ReviewPriority.HIGH,
+                category="bug"
+            ),
+            ReviewComment(
+                body="Minor style issue",
+                path="src/utils.py",
+                position=3,
+                priority=ReviewPriority.LOW,
+                category="style"
+            ),
+        ]
+
+        summary = client._generate_review_summary(comments)
+
+        assert "Gemini AI Code Review" in summary
+        assert "Key findings:" in summary
+        assert "secrets.py" in summary
+        assert "api.go" in summary
+        # Low priority should not appear in key findings
+        assert "Minor style" not in summary.split("Key findings:")[1] if "Key findings:" in summary else True
