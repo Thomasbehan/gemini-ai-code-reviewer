@@ -7,6 +7,7 @@ and implements concurrent processing for improved performance.
 
 import asyncio
 import logging
+import os
 import time
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -72,8 +73,7 @@ class CodeReviewer:
         logger.info("=== Starting Pull Request Review ===")
 
         # Check if this is a command-triggered fresh review (/gemini-review or /review)
-        import os as _os
-        self._force_fresh_review = _os.environ.get("FORCE_FRESH_REVIEW", "").lower() == "true"
+        self._force_fresh_review = os.environ.get("FORCE_FRESH_REVIEW", "").lower() == "true"
         if self._force_fresh_review:
             logger.info("🔄 COMMAND-TRIGGERED FRESH REVIEW: Skipping incremental diff and follow-up mode.")
 
@@ -453,7 +453,6 @@ class CodeReviewer:
         if not full_file_content:
             # Fallback to local file if available
             try:
-                import os
                 local_path = os.path.join(os.getcwd(), file_path)
                 if os.path.exists(local_path):
                     with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -483,14 +482,20 @@ class CodeReviewer:
         
         # Get prompt template based on configuration and review type
         # If this is a follow-up review, temporarily override to FOLLOWUP mode
+        from .prompts import ReviewMode
         if self._is_followup_review:
-            from .prompts import ReviewMode
             # Save original mode
             original_mode = self.config.review.review_mode
             # Temporarily set to FOLLOWUP mode
             self.config.review.review_mode = ReviewMode.FOLLOWUP
             prompt_template = self.config.get_review_prompt_template(self._previous_comments)
             # Restore original mode
+            self.config.review.review_mode = original_mode
+        elif os.environ.get("REVIEW_MODE_GORDON", "").lower() == "true":
+            # Gordon Ramsay mode easter egg
+            original_mode = self.config.review.review_mode
+            self.config.review.review_mode = ReviewMode.GORDON
+            prompt_template = self.config.get_review_prompt_template()
             self.config.review.review_mode = original_mode
         else:
             prompt_template = self.config.get_review_prompt_template()

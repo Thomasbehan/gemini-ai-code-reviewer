@@ -105,7 +105,13 @@ def check_if_valid_trigger() -> bool:
 
             # Set flag so the reviewer knows this is a command-triggered fresh review
             os.environ["FORCE_FRESH_REVIEW"] = "true"
-            print("Info: Review command detected, triggering fresh full review.")
+
+            # Check for Gordon Ramsay easter egg mode: /review gordon
+            if "/review gordon" in comment_body or "/gemini-review gordon" in comment_body:
+                os.environ["REVIEW_MODE_GORDON"] = "true"
+                print("Info: 👨‍🍳🔥 GORDON MODE ACTIVATED! This kitchen is about to get HOT!")
+            else:
+                print("Info: Review command detected, triggering fresh full review.")
             return True
 
         return False

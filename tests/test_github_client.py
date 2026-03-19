@@ -2734,3 +2734,68 @@ class TestGitHubClientExistingBotComments:
         assert "api.go" in summary
         # Low priority should not appear in key findings
         assert "Minor style" not in summary.split("Key findings:")[1] if "Key findings:" in summary else True
+
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_gordon_mode_review_summary(
+        self, mock_session, mock_github, valid_config
+    ):
+        """Test that Gordon mode produces Ramsay-style summary."""
+        import os
+        os.environ["REVIEW_MODE_GORDON"] = "true"
+        try:
+            client = GitHubClient(valid_config)
+
+            comments = [
+                ReviewComment(
+                    body="This function will crash with a null pointer",
+                    path="src/handler.go",
+                    position=5,
+                    priority=ReviewPriority.CRITICAL,
+                    category="bug"
+                ),
+                ReviewComment(
+                    body="Missing input validation on user data",
+                    path="src/api.go",
+                    position=10,
+                    priority=ReviewPriority.HIGH,
+                    category="security"
+                ),
+            ]
+
+            summary = client._generate_review_summary(comments)
+            assert "CHEF RAMSAY" in summary
+            assert "SHUT IT DOWN" in summary
+            assert "UNACCEPTABLE" in summary
+            assert "worst offenders" in summary
+
+            # Test Gordon approval message
+            approval = client._generate_approval_message()
+            assert "CHEF RAMSAY" in approval
+            assert "BEAUTIFUL" in approval
+        finally:
+            os.environ.pop("REVIEW_MODE_GORDON", None)
+
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_gordon_mode_off_by_default(
+        self, mock_session, mock_github, valid_config
+    ):
+        """Test that Gordon mode is not active by default."""
+        import os
+        os.environ.pop("REVIEW_MODE_GORDON", None)
+        client = GitHubClient(valid_config)
+
+        comments = [
+            ReviewComment(
+                body="Bug found",
+                path="src/main.go",
+                position=5,
+                priority=ReviewPriority.HIGH,
+                category="bug"
+            ),
+        ]
+
+        summary = client._generate_review_summary(comments)
+        assert "CHEF RAMSAY" not in summary
+        assert "Gemini AI Code Review" in summary

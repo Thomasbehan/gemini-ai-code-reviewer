@@ -25,6 +25,7 @@ class TestReviewMode:
         assert ReviewMode.SECURITY_FOCUSED.value == "security_focused"
         assert ReviewMode.PERFORMANCE_FOCUSED.value == "performance_focused"
         assert ReviewMode.FOLLOWUP.value == "followup"
+        assert ReviewMode.GORDON.value == "gordon"
 
     def test_from_value(self):
         """Test creating enum from string value."""
@@ -163,8 +164,19 @@ class TestGetReviewPromptTemplate:
             ReviewMode.LENIENT,
             ReviewMode.SECURITY_FOCUSED,
             ReviewMode.PERFORMANCE_FOCUSED,
+            ReviewMode.GORDON,
         ]
         for mode in regular_modes:
             prompt = get_review_prompt_template(mode)
             assert BASE_PROMPT_TEMPLATE in prompt, f"Base template missing for {mode}"
             assert NOISE_CONTROL in prompt, f"Noise control missing for {mode}"
+
+    def test_gordon_mode_prompt(self):
+        """Test Gordon Ramsay mode includes his signature style."""
+        prompt = get_review_prompt_template(ReviewMode.GORDON)
+        assert "GORDON RAMSAY" in prompt
+        assert "KITCHEN" in prompt
+        assert "Hell's Kitchen" in prompt
+        assert MODE_INSTRUCTIONS[ReviewMode.GORDON] in prompt
+        # Should still include base technical review instructions
+        assert BASE_PROMPT_TEMPLATE in prompt
