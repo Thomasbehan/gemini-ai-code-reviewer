@@ -72,17 +72,31 @@ SCOPE: Report ONLY issues that must be fixed (critical/serious):
   Set priority to "medium" for naming issues (not "high" or "critical").
 - Serious Code Quality / Best Practice violations that impact correctness, security, or performance
 
+CRITICAL SCOPE CONSTRAINT:
+- You may ONLY comment on lines that appear in the diff hunk below.
+- Lines prefixed with '+' are ADDED lines — these are your primary review targets.
+- Lines prefixed with ' ' (space) are CONTEXT lines — you may reference them but only
+  if the issue is directly caused by or visible in the adjacent '+' lines.
+- Lines prefixed with '-' are REMOVED lines — do NOT comment on these unless the
+  removal itself introduces a concrete breakage.
+- NEVER comment on code that only appears in the "Full File Content" section but is
+  NOT present in the diff hunk. The full file content is provided ONLY for understanding
+  context (imports, class structure, patterns) — it is NOT in scope for review.
+- If you find an issue in the full file that was NOT changed in the diff, do NOT report it.
+
 ANCHORING:
 - You review ONE diff hunk at a time; lineNumber is 1-based within this hunk.
-- Prefer '+' (added) lines; use nearby context ' ' lines only if necessary (±3 lines).
-- Never target '-' (removed) lines unless the act of removal introduces a problem.
+- lineNumber MUST point to a line in the diff hunk (preferably a '+' line).
+- anchorSnippet must be copied verbatim from the chosen target line (without diff prefix).
+  If you cannot anchor to a line in the diff hunk, omit the item entirely.
 - Do NOT suggest re-adding code that was intentionally removed unless you can show
   a concrete breakage (e.g., API contract violation, missing required behavior, clear bug).
-- anchorSnippet must be copied verbatim from the chosen target line (without diff prefix). If you cannot anchor confidently, omit the item.
 
 CONTEXT AWARENESS:
 - Use any provided repository/project context to understand how this hunk integrates
   with the rest of the codebase. Prefer fixes that align with existing patterns and APIs.
+- The full file content and project context are reference material ONLY — they define
+  what exists, not what you should review. Your review scope is strictly the diff hunk.
 - If functionality was moved or simplified by deletions, treat that as a potential improvement,
   not a regression, unless you can demonstrate a specific problem introduced by the change.
 

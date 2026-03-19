@@ -280,33 +280,31 @@ class GeminiClient:
                 full_content = full_content[:max_file_content] + "\n... (truncated, full file is larger)"
 
             prompt_parts.extend([
-                "Full File Content (for understanding context around the diff):",
+                "Full File Content (REFERENCE ONLY — do NOT review this, only use it for context):",
                 "```",
                 full_content,
                 "```",
                 "",
-                "Use the full file content to understand:",
+                "The full file content is provided ONLY so you can understand:",
                 "- What imports are available at the top of the file",
                 "- What class/function the changed code belongs to",
-                "- Other methods in the same class that might be affected",
                 "- The overall structure and patterns used in this file",
+                "Do NOT report issues found only in the full file content. Your review",
+                "scope is STRICTLY the diff hunk below — only comment on changed lines.",
                 ""
             ])
 
         # Add project context if available (related file contents)
         if context.project_context:
             prompt_parts.extend([
-                "Project Context (Related Files):",
+                "Project Context (Related Files — REFERENCE ONLY):",
                 "---",
                 context.project_context,
                 "---",
                 "",
-                "Use the above related files to understand how this code fits into the larger project.",
-                "Look for:",
-                "- Incorrect usage of APIs or functions defined in related files",
-                "- Violations of patterns established in the codebase",
-                "- Missing error handling based on how related code behaves",
-                "- Type mismatches or contract violations",
+                "Use the above related files to understand how changed code fits into the project.",
+                "Only flag issues where the CHANGED lines ('+' lines in the diff) violate these patterns.",
+                "Do NOT report issues in the related files themselves.",
                 ""
             ])
 

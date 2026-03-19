@@ -114,6 +114,18 @@ class CommentProcessor:
                         logger.warning("Anchor snippet not found in hunk; discarding comment to avoid misalignment")
                         return None
 
+            # Hard filter: reject comments targeting context lines that are not near any changed line.
+            # This prevents the AI from commenting on unchanged code it saw in the full file content.
+            target_line = hunk.lines[position - 1]
+            if target_line.startswith(' '):
+                # Context line — only allow if there's a '+' line within the position window
+                pos_window = getattr(self.review_config, 'position_window', 2)
+                nearby_range = range(max(0, position - 1 - pos_window), min(len(hunk.lines), position + pos_window))
+                has_nearby_addition = any(hunk.lines[i].startswith('+') for i in nearby_range)
+                if not has_nearby_addition:
+                    logger.info(f"Rejecting comment on context line {position} — no nearby additions in hunk")
+                    return None
+
             # Prefer commenting on added lines; if current is deletion-only, try to nudge to nearby added/context
             if hunk.lines[position - 1].startswith('-'):
                 # Look within a configurable window for a '+' or ' ' line
