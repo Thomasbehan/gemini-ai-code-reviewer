@@ -1964,6 +1964,8 @@ class TestCodeReviewerAnalysisSingleFileExtended:
 
         mock_github.return_value.get_file_content.return_value = "print('hello')"
         mock_github.return_value._compute_signature.return_value = "sig123"
+        # Verify pass keeps the single finding.
+        mock_gemini.return_value.verify_findings.return_value = [1]
 
         diff_file = DiffFile(
             file_info=FileInfo(path="main.py"),
@@ -2647,3 +2649,105 @@ class TestCodeReviewerConfigFiltering:
             with patch.object(mock_config, 'should_review_file', return_value=False):
                 result = await reviewer._filter_files([diff_file])
                 assert isinstance(result, list)
+
+
+class TestHandleReviewCommentReply:
+    """Tests for CodeReviewer.handle_review_comment_reply (in-thread replies)."""
+
+    @pytest.fixture
+    def mock_config(self):
+        return Config(github=GitHubConfig(token="ghp_test123456789012"),
+                      gemini=GeminiConfig(api_key="AIzaSyTestKey123456"))
+
+    def _reviewer(self, mock_config):
+        with patch("gemini_reviewer.code_reviewer.GitHubClient"), \
+             patch("gemini_reviewer.code_reviewer.GeminiClient"), \
+             patch("gemini_reviewer.code_reviewer.DiffParser"), \
+             patch("gemini_reviewer.code_reviewer.ContextBuilder"), \
+             patch("gemini_reviewer.code_reviewer.CommentProcessor"):
+            return CodeReviewer(mock_config)
+
+    def _event(self, tmp_path, in_reply_to_id=100):
+        import json as _json
+        p = tmp_path / "event.json"
+        p.write_text(_json.dumps({"comment": {"in_reply_to_id": in_reply_to_id, "body": "human reply"}}))
+        return str(p)
+
+    def _pr(self):
+        return PRDetails("owner", "repo", 123, "T", "D", "sha")
+
+    def test_posts_reply_on_bot_thread(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        reviewer.github_client.get_pr_details_from_event.return_value = self._pr()
+        reviewer.github_client.get_review_comment_thread.return_value = {
+            "root_id": 100, "root_body": "Bug here", "code_context": "@@hunk",
+            "root_is_bot": True,
+            "messages": [{"author": "bot", "body": "Bug here", "is_bot": True},
+                         {"author": "alice", "body": "why?", "is_bot": False}],
+            "bot_login": "bot",
+        }
+        reviewer.gemini_client.respond_to_reply.return_value = {"reply": "Because line 4.", "resolved": False}
+        reviewer.github_client._append_signature_marker.return_value = "Because line 4.\n<!-- AI-SIG:abc123 -->"
+        reviewer.github_client.reply_to_comment.return_value = True
+
+        assert reviewer.handle_review_comment_reply(self._event(tmp_path)) is True
+        reviewer.github_client.reply_to_comment.assert_called_once()
+        # The posted body is the signed reply.
+        args = reviewer.github_client.reply_to_comment.call_args[0]
+        assert args[1] == 100
+        assert "AI-SIG" in args[2]
+
+    def test_skips_when_no_in_reply_to(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        import json as _json
+        p = tmp_path / "e.json"
+        p.write_text(_json.dumps({"comment": {"body": "top-level"}}))
+        assert reviewer.handle_review_comment_reply(str(p)) is False
+        reviewer.github_client.get_review_comment_thread.assert_not_called()
+
+    def test_skips_when_thread_unresolved(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        reviewer.github_client.get_pr_details_from_event.return_value = self._pr()
+        reviewer.github_client.get_review_comment_thread.return_value = None
+        assert reviewer.handle_review_comment_reply(self._event(tmp_path)) is False
+
+    def test_skips_when_root_not_bot(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        reviewer.github_client.get_pr_details_from_event.return_value = self._pr()
+        reviewer.github_client.get_review_comment_thread.return_value = {
+            "root_id": 100, "root_body": "human comment", "code_context": "",
+            "root_is_bot": False, "messages": [], "bot_login": "bot",
+        }
+        assert reviewer.handle_review_comment_reply(self._event(tmp_path)) is False
+        reviewer.gemini_client.respond_to_reply.assert_not_called()
+
+    def test_loop_guard_last_message_is_bot(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        reviewer.github_client.get_pr_details_from_event.return_value = self._pr()
+        reviewer.github_client.get_review_comment_thread.return_value = {
+            "root_id": 100, "root_body": "Bug", "code_context": "",
+            "root_is_bot": True,
+            "messages": [{"author": "bot", "body": "Bug", "is_bot": True}],
+            "bot_login": "bot",
+        }
+        assert reviewer.handle_review_comment_reply(self._event(tmp_path)) is False
+        reviewer.gemini_client.respond_to_reply.assert_not_called()
+
+    def test_skips_when_empty_reply_generated(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        reviewer.github_client.get_pr_details_from_event.return_value = self._pr()
+        reviewer.github_client.get_review_comment_thread.return_value = {
+            "root_id": 100, "root_body": "Bug", "code_context": "",
+            "root_is_bot": True,
+            "messages": [{"author": "alice", "body": "why?", "is_bot": False}],
+            "bot_login": "bot",
+        }
+        reviewer.gemini_client.respond_to_reply.return_value = {"reply": "", "resolved": False}
+        assert reviewer.handle_review_comment_reply(self._event(tmp_path)) is False
+        reviewer.github_client.reply_to_comment.assert_not_called()
+
+    def test_bad_event_file_returns_false(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        p = tmp_path / "bad.json"
+        p.write_text("{not json")
+        assert reviewer.handle_review_comment_reply(str(p)) is False

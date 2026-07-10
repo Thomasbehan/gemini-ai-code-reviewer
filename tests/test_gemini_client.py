@@ -1005,3 +1005,88 @@ class TestGeminiClientCaching:
             client._cache = {}
             result = client._get_cached("nonexistent")
             assert result is None
+
+
+class TestVerifyFindings:
+    """Tests for the adversarial verify pass (verify_findings)."""
+
+    @pytest.fixture
+    def valid_config(self):
+        return GeminiConfig(api_key="AIzaSyTestKey123456", model_name="gemini-pro", temperature=0.0)
+
+    def _client_returning(self, mock_genai, valid_config, text):
+        mock_model = Mock()
+        mock_response = Mock()
+        mock_response.text = text
+        mock_response.candidates = None
+        mock_model.generate_content.return_value = mock_response
+        mock_genai.GenerativeModel.return_value = mock_model
+        return GeminiClient(valid_config)
+
+    def test_empty_findings_returns_empty(self, valid_config):
+        with patch("gemini_reviewer.gemini_client.genai") as mock_genai:
+            mock_genai.GenerativeModel.return_value = Mock()
+            client = GeminiClient(valid_config)
+            assert client.verify_findings("some diff", []) == []
+
+    def test_no_diff_keeps_all(self, valid_config):
+        with patch("gemini_reviewer.gemini_client.genai") as mock_genai:
+            mock_genai.GenerativeModel.return_value = Mock()
+            client = GeminiClient(valid_config)
+            assert client.verify_findings("", ["a", "b"]) == [1, 2]
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_keeps_subset(self, mock_genai, valid_config):
+        client = self._client_returning(mock_genai, valid_config, '{"keep": [1], "notes": "dropped 2 (false positive)"}')
+        assert client.verify_findings("+ some diff", ["real bug", "false positive"]) == [1]
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_keeps_none(self, mock_genai, valid_config):
+        client = self._client_returning(mock_genai, valid_config, '{"keep": [], "notes": "all speculative"}')
+        assert client.verify_findings("+ diff", ["x", "y"]) == []
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_fails_open_on_bad_json(self, mock_genai, valid_config):
+        client = self._client_returning(mock_genai, valid_config, "not json at all")
+        # Fail-open: keep all rather than silently drop real findings.
+        assert client.verify_findings("+ diff", ["a", "b", "c"]) == [1, 2, 3]
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_ignores_out_of_range_indices(self, mock_genai, valid_config):
+        client = self._client_returning(mock_genai, valid_config, '{"keep": [1, 5, 99]}')
+        assert client.verify_findings("+ diff", ["a", "b"]) == [1]
+
+
+class TestRespondToReply:
+    """Tests for respond_to_reply (in-thread replies to humans)."""
+
+    @pytest.fixture
+    def valid_config(self):
+        return GeminiConfig(api_key="AIzaSyTestKey123456", model_name="gemini-pro", temperature=0.0)
+
+    def _client_returning(self, mock_genai, valid_config, text):
+        mock_model = Mock()
+        mock_response = Mock()
+        mock_response.text = text
+        mock_response.candidates = None
+        mock_model.generate_content.return_value = mock_response
+        mock_genai.GenerativeModel.return_value = mock_model
+        return GeminiClient(valid_config)
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_parses_reply_and_resolved(self, mock_genai, valid_config):
+        client = self._client_returning(mock_genai, valid_config, '{"reply": "You are right, conceded.", "resolved": true}')
+        result = client.respond_to_reply("orig", "code", "human: fixed it")
+        assert result == {"reply": "You are right, conceded.", "resolved": True}
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_defaults_resolved_false(self, mock_genai, valid_config):
+        client = self._client_returning(mock_genai, valid_config, '{"reply": "Still stands: line 4 nil-derefs."}')
+        result = client.respond_to_reply("orig", "code", "human: nah")
+        assert result["reply"].startswith("Still stands")
+        assert result["resolved"] is False
+
+    @patch("gemini_reviewer.gemini_client.genai")
+    def test_bad_json_returns_empty(self, mock_genai, valid_config):
+        client = self._client_returning(mock_genai, valid_config, "not json")
+        assert client.respond_to_reply("orig", "code", "thread") == {"reply": "", "resolved": False}

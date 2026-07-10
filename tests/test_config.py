@@ -137,8 +137,8 @@ class TestReviewConfig:
         config = ReviewConfig()
         assert config.review_mode == ReviewMode.STANDARD
         assert config.focus_areas == [ReviewFocus.ALL]
-        assert config.max_files_per_review == 50
-        assert config.max_lines_per_hunk == 500
+        assert config.max_files_per_review == 10000
+        assert config.max_lines_per_hunk == 20000
         assert config.review_test_files is False
         assert config.review_docs is False
         assert config.priority_threshold == ReviewPriority.LOW

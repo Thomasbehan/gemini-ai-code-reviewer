@@ -74,6 +74,10 @@ class GitHubClient:
             # For comment triggers, we need to get the PR number from the issue
             pull_number = event_data["issue"]["number"]
             repo_full_name = event_data["repository"]["full_name"]
+        elif isinstance(event_data.get("pull_request"), dict) and "number" in event_data["pull_request"]:
+            # Review-comment events carry the PR as a nested object, not a top-level number.
+            pull_number = event_data["pull_request"]["number"]
+            repo_full_name = event_data["repository"]["full_name"]
         else:
             # Original logic for direct PR events
             pull_number = event_data["number"]
@@ -1147,6 +1151,86 @@ class GitHubClient:
         except Exception as e:
             logger.debug(f"Error fetching comment replies: {str(e)}")
             return []
+
+    def get_authenticated_login(self) -> Optional[str]:
+        """Best-effort login of the token identity (used as a loop guard)."""
+        try:
+            return self._client.get_user().login
+        except Exception:
+            return None
+
+    def get_review_comment_thread(self, pr_details: PRDetails, comment_id: int) -> Optional[Dict[str, Any]]:
+        """Fetch the full review-comment thread that `comment_id` belongs to.
+
+        Returns a dict:
+          {root_id, root_body, root_author, root_is_bot, code_context (diff_hunk),
+           messages: [{author, body, is_bot}] oldest-first, bot_login}
+        or None if it can't be resolved. Used to respond to human replies on the
+        bot's own review threads.
+        """
+        try:
+            url = f"https://api.github.com/repos/{pr_details.owner}/{pr_details.repo}/pulls/{pr_details.pull_number}/comments"
+            headers = {"Authorization": f"Bearer {self.config.token}", "Accept": "application/vnd.github.v3+json"}
+            response = requests.get(url, headers=headers, timeout=self.config.timeout)
+            if response.status_code != 200:
+                logger.debug(f"Could not fetch review comments for thread: HTTP {response.status_code}")
+                return None
+            all_comments = response.json()
+            by_id = {c.get("id"): c for c in all_comments}
+            target = by_id.get(comment_id)
+            if not target:
+                return None
+            # Walk to the thread root (the comment with no in_reply_to_id).
+            root = target
+            seen = set()
+            while root.get("in_reply_to_id") and root.get("in_reply_to_id") in by_id and root.get("id") not in seen:
+                seen.add(root.get("id"))
+                root = by_id[root["in_reply_to_id"]]
+            root_id = root.get("id")
+            root_path = root.get("path")
+            root_pos = root.get("position") or root.get("original_position")
+            # Collect the thread: the root + everything replying into it (or same path+position).
+            thread = [root]
+            for c in all_comments:
+                if c.get("id") == root_id:
+                    continue
+                if c.get("in_reply_to_id") == root_id or (
+                    c.get("in_reply_to_id") is not None
+                    and c.get("path") == root_path
+                    and (c.get("position") or c.get("original_position")) == root_pos
+                ):
+                    thread.append(c)
+            thread.sort(key=lambda c: c.get("created_at") or "")
+
+            bot_login = self.get_authenticated_login()
+
+            def _is_bot(c: Dict[str, Any]) -> bool:
+                body = c.get("body", "") or ""
+                if re.search(r"<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->", body, flags=re.IGNORECASE):
+                    return True
+                author = (c.get("user") or {}).get("login", "")
+                return bool(bot_login and author == bot_login) or author.endswith("[bot]")
+
+            messages = [
+                {
+                    "author": (c.get("user") or {}).get("login", "unknown"),
+                    "body": self._strip_signature_marker(c.get("body", "") or ""),
+                    "is_bot": _is_bot(c),
+                }
+                for c in thread
+            ]
+            return {
+                "root_id": root_id,
+                "root_body": self._strip_signature_marker(root.get("body", "") or ""),
+                "root_author": (root.get("user") or {}).get("login", ""),
+                "root_is_bot": _is_bot(root),
+                "code_context": root.get("diff_hunk", "") or "",
+                "messages": messages,
+                "bot_login": bot_login,
+            }
+        except Exception as e:
+            logger.debug(f"Error fetching review comment thread: {e}")
+            return None
 
     def reply_to_comment(self, pr_details: PRDetails, comment_id: int, reply_body: str = "✅ This has been fixed thank you") -> bool:
         """Post a reply to an existing review comment.

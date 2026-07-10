@@ -58,9 +58,9 @@ def validate_environment() -> bool:
         print(f"Error: Missing required environment variables: {', '.join(missing_vars)}")
         return False
     
-    # Validate event name - support both pull_request and issue_comment
+    # Validate event name - support pull_request, issue_comment, and review-comment replies
     event_name = os.environ.get("GITHUB_EVENT_NAME", "")
-    supported_events = ["pull_request", "issue_comment"]
+    supported_events = ["pull_request", "issue_comment", "pull_request_review_comment"]
     if event_name not in supported_events:
         print(f"Error: Unsupported GitHub event: {event_name}. Supported events: {', '.join(supported_events)}")
         return False
@@ -114,6 +114,29 @@ def check_if_valid_trigger() -> bool:
                 print("Info: Review command detected, triggering fresh full review.")
             return True
 
+        # Handle pull_request_review_comment events (human replies on a review thread)
+        elif event_name == "pull_request_review_comment":
+            import re
+            if event_data.get("action", "") != "created":
+                print("Info: Review comment not 'created', skipping.")
+                return False
+
+            comment = event_data.get("comment", {})
+            # Only replies within a thread (not top-level review comments).
+            if not comment.get("in_reply_to_id"):
+                print("Info: Review comment is not a reply to an existing thread, skipping.")
+                return False
+
+            # Ignore the bot's own replies (loop guard on the signed reply marker).
+            body = comment.get("body", "") or ""
+            if re.search(r"<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->", body, flags=re.IGNORECASE):
+                print("Info: Reply authored by the reviewer itself, skipping (loop guard).")
+                return False
+
+            os.environ["REPLY_EVENT"] = "true"
+            print("Info: Human reply on a review thread detected, generating response.")
+            return True
+
         return False
 
     except Exception as e:
@@ -157,7 +180,13 @@ async def main_async() -> int:
                 return 1
             
             logger.info("✅ All external service connections are working")
-            
+
+            # Human reply on a review thread → respond in-thread, skip full review.
+            if os.environ.get("REPLY_EVENT") == "true":
+                posted = reviewer.handle_review_comment_reply(os.environ["GITHUB_EVENT_PATH"])
+                logger.info("✅ Reply handled" if posted else "ℹ️ No reply posted")
+                return 0
+
             # Perform the code review
             result = await reviewer.review_pull_request(os.environ["GITHUB_EVENT_PATH"])
             

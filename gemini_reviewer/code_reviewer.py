@@ -6,6 +6,7 @@ and implements concurrent processing for improved performance.
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -98,30 +99,30 @@ class CodeReviewer:
                 # Reset tracking for this run
                 self._unresolved_prior_ids = set()
                 self._current_review_file_paths = set()
+                # Every run is a COMPREHENSIVE review of the in-scope diff — like a
+                # human (or Claude Code Review) re-reading the newly-pushed code.
+                # New pushes are scoped to the incremental diff (new commits) via
+                # _get_pr_diff, but that new code is fully reviewed, not merely
+                # checked against old comments. Prior bot comments are loaded only
+                # so the AI is aware of what was already raised (avoid repeating
+                # itself); duplicate suppression is handled by comment signatures.
+                self._is_followup_review = False
+                self._comment_id_mapping = {}
+                self._previous_bot_comments = existing_bot_comments or []
                 if existing_bot_comments and not self._force_fresh_review:
-                    self._is_followup_review = True
-                    # Format previous comments for the AI and store ID mapping
                     formatted_comments = []
-                    self._comment_id_mapping = {}  # Map comment index to comment ID
                     for i, comment in enumerate(existing_bot_comments, 1):
                         formatted_comments.append(
-                            f"{i}. File: {comment['path']}\n"
-                            f"   Line: {comment.get('line', 'N/A')}\n"
-                            f"   Comment: {comment['body']}\n"
-                            f"   Posted: {comment.get('created_at', 'N/A')}"
+                            f"{i}. File: {comment['path']} (line {comment.get('line', 'N/A')}): {comment['body']}"
                         )
-                        # Store mapping of comment index to ID for resolution later
-                        if comment.get('id'):
-                            self._comment_id_mapping[i] = comment['id']
-                    self._previous_comments = "\n\n".join(formatted_comments)
-                    self._previous_bot_comments = existing_bot_comments  # Store full comment data
-                    logger.info(f"🔄 FOLLOW-UP REVIEW MODE: Found {len(existing_bot_comments)} previous bot comments. AI will ONLY check if they were resolved.")
+                    self._previous_comments = "\n".join(formatted_comments)
+                    logger.info(
+                        f"🔁 INCREMENTAL COMPREHENSIVE REVIEW: {len(existing_bot_comments)} prior comment(s) noted "
+                        f"for awareness; reviewing the newly-pushed code in full."
+                    )
                 else:
-                    self._is_followup_review = False
                     self._previous_comments = ""
-                    self._comment_id_mapping = {}
-                    self._previous_bot_comments = []
-                    logger.info("✨ FIRST REVIEW: No previous bot comments found. AI will perform initial comprehensive review.")
+                    logger.info("✨ FIRST REVIEW: performing initial comprehensive review.")
             except Exception as _e:
                 logger.debug(f"Could not determine review type: {_e}")
                 self._is_followup_review = False
@@ -540,10 +541,26 @@ class CodeReviewer:
                 logger.error(f"Unexpected error analyzing hunk in {file_path}: {str(e)}")
                 continue
         
+        # Second-pass verification: drop candidate findings that don't survive an
+        # adversarial re-check (false positives). Fails open inside verify_findings.
+        if file_comments and getattr(self.config.review, "enable_verify_pass", True):
+            try:
+                diff_text = "\n\n".join(h.content for h in diff_file.hunks if getattr(h, "content", None))
+                findings = [c.body for c in file_comments]
+                kept_indices = set(self.gemini_client.verify_findings(diff_text, findings))
+                if len(kept_indices) < len(file_comments):
+                    verified = [c for i, c in enumerate(file_comments, 1) if i in kept_indices]
+                    logger.info(
+                        f"Verify pass filtered {file_path}: {len(file_comments)} -> {len(verified)} finding(s)"
+                    )
+                    file_comments = verified
+            except Exception as e:
+                logger.debug(f"Verify pass skipped for {file_path}: {e}")
+
         # Track files with issues during follow-up review for resolution checking
         if self._is_followup_review and file_comments:
             self._current_followup_issues.add(file_path)
-        
+
         logger.debug(f"Generated {len(file_comments)} comments for {file_path}")
         return file_comments
     
@@ -866,6 +883,60 @@ class CodeReviewer:
             )
 
         return "\n".join(summary_parts[:30])  # Limit to 30 files
+
+    def handle_review_comment_reply(self, event_path: str) -> bool:
+        """Respond to a human reply on one of the reviewer's own inline threads.
+
+        Loads the thread + the code it's anchored to, asks Gemini for a collegial
+        response, and posts it back in-thread. Returns True if a reply was posted.
+        """
+        try:
+            with open(event_path, "r") as f:
+                event_data = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logger.error(f"Could not load reply event: {e}")
+            return False
+
+        reply_comment = event_data.get("comment", {})
+        root_id = reply_comment.get("in_reply_to_id")
+        if not root_id:
+            logger.info("Reply event has no in_reply_to_id; nothing to respond to.")
+            return False
+
+        pr_details = self.github_client.get_pr_details_from_event(event_path)
+        thread = self.github_client.get_review_comment_thread(pr_details, int(root_id))
+        if not thread:
+            logger.info("Could not resolve the review-comment thread; skipping reply.")
+            return False
+
+        # Only engage on threads the reviewer itself started.
+        if not thread.get("root_is_bot"):
+            logger.info("Thread root is not a reviewer comment; skipping reply.")
+            return False
+
+        # Loop guard: never respond if the latest message is the reviewer's own.
+        messages = thread.get("messages", [])
+        if messages and messages[-1].get("is_bot"):
+            logger.info("Latest message is the reviewer's own; skipping to avoid a loop.")
+            return False
+
+        thread_text = "\n\n".join(
+            f"{'REVIEWER' if m.get('is_bot') else m.get('author', 'human')}: {m.get('body', '')}"
+            for m in messages
+        )
+        result = self.gemini_client.respond_to_reply(
+            original_comment=thread.get("root_body", ""),
+            code_context=thread.get("code_context", ""),
+            thread=thread_text,
+        )
+        reply_body = (result.get("reply") or "").strip()
+        if not reply_body:
+            logger.info("No reply generated for the thread.")
+            return False
+
+        # Sign the reply so future reply events skip it (loop guard).
+        signed = self.github_client._append_signature_marker(reply_body, thread.get("root_body", ""))
+        return self.github_client.reply_to_comment(pr_details, int(root_id), signed)
 
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive processing statistics."""

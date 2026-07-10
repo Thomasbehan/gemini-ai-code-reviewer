@@ -119,7 +119,63 @@ class GeminiClient:
             self._failed_requests += 1
             logger.error(f"Error analyzing code hunk: {str(e)}")
             raise
-    
+
+    def verify_findings(self, diff_text: str, findings: List[str]) -> List[int]:
+        """Adversarial second pass: given a file's diff and the candidate findings,
+        return the 1-based indices of the findings that survive verification.
+
+        Fails OPEN (keeps all findings) on any error, so a verifier hiccup never
+        silently drops real review comments.
+        """
+        from .prompts import get_verify_prompt
+
+        if not findings:
+            return []
+        all_indices = list(range(1, len(findings) + 1))
+        if not diff_text:
+            return all_indices
+        try:
+            numbered = "\n".join(f"{i}. {f}" for i, f in enumerate(findings, 1))
+            prompt = get_verify_prompt(diff_text, numbered)
+            if len(prompt) > self.config.max_prompt_length:
+                prompt = prompt[: self.config.max_prompt_length] + "\n...[truncated]"
+            response = self._generate_content_with_validation(prompt)
+            cleaned = self._clean_response_text(response)
+            data = json.loads(cleaned)
+            keep = data.get("keep", all_indices)
+            if not isinstance(keep, list):
+                return all_indices
+            kept = [int(i) for i in keep if isinstance(i, (int, float, str)) and str(i).strip().lstrip("-").isdigit()]
+            kept = [i for i in kept if 1 <= i <= len(findings)]
+            notes = data.get("notes", "")
+            logger.info(f"Verify pass kept {len(kept)}/{len(findings)} findings. {notes}")
+            return kept if kept or "keep" in data else all_indices
+        except Exception as e:
+            logger.warning(f"Verify pass failed ({e}); keeping all {len(findings)} findings (fail-open)")
+            return all_indices
+
+    def respond_to_reply(self, original_comment: str, code_context: str, thread: str) -> Dict[str, Any]:
+        """Generate a reply to a human's response on one of the bot's review threads.
+
+        Returns {"reply": str, "resolved": bool}. Returns an empty reply on failure
+        so the caller can choose to stay silent rather than post noise.
+        """
+        from .prompts import get_reply_prompt
+
+        try:
+            prompt = get_reply_prompt(original_comment, code_context, thread)
+            if len(prompt) > self.config.max_prompt_length:
+                prompt = prompt[: self.config.max_prompt_length] + "\n...[truncated]"
+            response = self._generate_content_with_validation(prompt)
+            cleaned = self._clean_response_text(response)
+            data = json.loads(cleaned)
+            reply = str(data.get("reply", "")).strip()
+            resolved = bool(data.get("resolved", False))
+            return {"reply": reply, "resolved": resolved}
+        except Exception as e:
+            logger.warning(f"Failed to generate reply to review thread: {e}")
+            return {"reply": "", "resolved": False}
+
     def _generate_content_with_validation(self, prompt: str) -> str:
         """Generate content with validation and error handling."""
         logger.info("Sending request to Gemini API...")

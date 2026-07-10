@@ -76,12 +76,18 @@ class ReviewConfig:
     focus_areas: List[ReviewFocus] = field(default_factory=lambda: [ReviewFocus.ALL])
     exclude_patterns: List[str] = field(default_factory=list)
     include_patterns: List[str] = field(default_factory=list)
-    max_files_per_review: int = 50
-    max_lines_per_hunk: int = 500
-    max_hunks_per_file: int = 20
+    # High safety ceilings, not routine drop-limits: a real reviewer never
+    # silently skips changed code on a large PR. Chunking (per-hunk calls)
+    # handles volume; these only guard against pathological/generated diffs,
+    # and hitting them is logged loudly rather than dropping code quietly.
+    max_files_per_review: int = 10000
+    max_lines_per_hunk: int = 20000
+    max_hunks_per_file: int = 2000
     min_line_changes: int = 1
     review_test_files: bool = False
     review_docs: bool = False
+    # Second-pass adversarial verification of candidate findings (drops false positives).
+    enable_verify_pass: bool = True
     custom_prompt_template: Optional[str] = None
     priority_threshold: ReviewPriority = ReviewPriority.LOW
     # Comment caps (optional). 0 disables limits (default behavior).
@@ -184,10 +190,12 @@ class Config:
             review_mode=review_mode,
             exclude_patterns=exclude_patterns,
             include_patterns=include_patterns,
-            max_files_per_review=get_env_int("MAX_FILES_PER_REVIEW", 50),
-            max_lines_per_hunk=get_env_int("MAX_LINES_PER_HUNK", 500),
+            max_files_per_review=get_env_int("MAX_FILES_PER_REVIEW", 10000),
+            max_lines_per_hunk=get_env_int("MAX_LINES_PER_HUNK", 20000),
+            max_hunks_per_file=get_env_int("MAX_HUNKS_PER_FILE", 2000),
             review_test_files=get_env_bool("REVIEW_TEST_FILES", False),
             review_docs=get_env_bool("REVIEW_DOCS", False),
+            enable_verify_pass=get_env_bool("ENABLE_VERIFY_PASS", True),
             custom_prompt_template=custom_prompt if custom_prompt else None,
             priority_threshold=priority_threshold,
             max_comments_total=get_env_int("MAX_COMMENTS_TOTAL", 0, "INPUT_MAX_COMMENTS_TOTAL"),

@@ -2799,3 +2799,132 @@ class TestGitHubClientExistingBotComments:
         summary = client._generate_review_summary(comments)
         assert "CHEF RAMSAY" not in summary
         assert "Gemini AI Code Review" in summary
+
+
+class TestGitHubClientReviewCommentThread:
+    """Tests for get_review_comment_thread + get_authenticated_login."""
+
+    @pytest.fixture
+    def valid_config(self):
+        return GitHubConfig(token="ghp_test123456789012")
+
+    @pytest.fixture
+    def sample_pr_details(self):
+        return PRDetails("owner", "repo", 123, "Title", "Desc", "head_sha")
+
+    def _bot_login_mock(self, mock_github, login="gemini-bot"):
+        instance = mock_github.return_value
+        user = Mock()
+        user.login = login
+        instance.get_user.return_value = user
+        return instance
+
+    @patch("gemini_reviewer.github_client.requests.get")
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_thread_resolved_with_bot_root(self, mock_session, mock_github, mock_get, valid_config, sample_pr_details):
+        self._bot_login_mock(mock_github)
+        resp = Mock()
+        resp.status_code = 200
+        resp.json.return_value = [
+            {"id": 100, "path": "f.py", "position": 3, "in_reply_to_id": None,
+             "diff_hunk": "@@ -1 +1 @@\n+x", "created_at": "2026-01-01T00:00:00Z",
+             "body": "Bug here <!-- AI-SIG:abc123 -->", "user": {"login": "gemini-bot"}},
+            {"id": 101, "path": "f.py", "position": 3, "in_reply_to_id": 100,
+             "created_at": "2026-01-02T00:00:00Z", "body": "Are you sure?", "user": {"login": "alice"}},
+        ]
+        mock_get.return_value = resp
+
+        client = GitHubClient(valid_config)
+        thread = client.get_review_comment_thread(sample_pr_details, 101)
+
+        assert thread is not None
+        assert thread["root_id"] == 100
+        assert thread["root_is_bot"] is True
+        assert thread["code_context"] == "@@ -1 +1 @@\n+x"
+        assert thread["root_body"] == "Bug here"  # marker stripped
+        assert [m["author"] for m in thread["messages"]] == ["gemini-bot", "alice"]
+        assert thread["messages"][-1]["is_bot"] is False
+
+    @patch("gemini_reviewer.github_client.requests.get")
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_thread_walks_to_root_from_reply_id(self, mock_session, mock_github, mock_get, valid_config, sample_pr_details):
+        self._bot_login_mock(mock_github)
+        resp = Mock()
+        resp.status_code = 200
+        resp.json.return_value = [
+            {"id": 100, "path": "f.py", "position": 3, "in_reply_to_id": None,
+             "diff_hunk": "hunk", "created_at": "t1", "body": "root", "user": {"login": "gemini-bot"}},
+            {"id": 101, "path": "f.py", "position": 3, "in_reply_to_id": 100,
+             "created_at": "t2", "body": "mid", "user": {"login": "alice"}},
+        ]
+        mock_get.return_value = resp
+        client = GitHubClient(valid_config)
+        # Pass the reply id; must still resolve root 100.
+        thread = client.get_review_comment_thread(sample_pr_details, 101)
+        assert thread["root_id"] == 100
+
+    @patch("gemini_reviewer.github_client.requests.get")
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_thread_http_error_returns_none(self, mock_session, mock_github, mock_get, valid_config, sample_pr_details):
+        resp = Mock()
+        resp.status_code = 404
+        mock_get.return_value = resp
+        client = GitHubClient(valid_config)
+        assert client.get_review_comment_thread(sample_pr_details, 1) is None
+
+    @patch("gemini_reviewer.github_client.requests.get")
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_thread_target_missing_returns_none(self, mock_session, mock_github, mock_get, valid_config, sample_pr_details):
+        resp = Mock()
+        resp.status_code = 200
+        resp.json.return_value = [{"id": 999, "in_reply_to_id": None, "body": "x", "user": {"login": "a"}}]
+        mock_get.return_value = resp
+        client = GitHubClient(valid_config)
+        assert client.get_review_comment_thread(sample_pr_details, 100) is None
+
+    @patch("gemini_reviewer.github_client.requests.get")
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_thread_exception_returns_none(self, mock_session, mock_github, mock_get, valid_config, sample_pr_details):
+        mock_get.side_effect = Exception("boom")
+        client = GitHubClient(valid_config)
+        assert client.get_review_comment_thread(sample_pr_details, 100) is None
+
+    @patch("gemini_reviewer.github_client.requests.get")
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_thread_bot_login_none_uses_marker_and_bot_suffix(self, mock_session, mock_github, mock_get, valid_config, sample_pr_details):
+        # get_user raises -> bot_login None; is_bot falls back to marker + [bot] suffix.
+        mock_github.return_value.get_user.side_effect = Exception("no user")
+        resp = Mock()
+        resp.status_code = 200
+        resp.json.return_value = [
+            {"id": 100, "path": "f.py", "position": 3, "in_reply_to_id": None,
+             "diff_hunk": "h", "created_at": "t1", "body": "root <!-- AI-SIG:deadbe -->", "user": {"login": "some-app[bot]"}},
+            {"id": 101, "path": "f.py", "position": 3, "in_reply_to_id": 100,
+             "created_at": "t2", "body": "human reply", "user": {"login": "alice"}},
+        ]
+        mock_get.return_value = resp
+        client = GitHubClient(valid_config)
+        thread = client.get_review_comment_thread(sample_pr_details, 101)
+        assert thread["bot_login"] is None
+        assert thread["root_is_bot"] is True
+        assert thread["messages"][-1]["is_bot"] is False
+
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_get_authenticated_login_success(self, mock_session, mock_github, valid_config):
+        self._bot_login_mock(mock_github, "the-bot")
+        client = GitHubClient(valid_config)
+        assert client.get_authenticated_login() == "the-bot"
+
+    @patch("gemini_reviewer.github_client.Github")
+    @patch("gemini_reviewer.github_client.requests.Session")
+    def test_get_authenticated_login_failure(self, mock_session, mock_github, valid_config):
+        mock_github.return_value.get_user.side_effect = Exception("nope")
+        client = GitHubClient(valid_config)
+        assert client.get_authenticated_login() is None

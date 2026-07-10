@@ -7,8 +7,10 @@ A GitHub Action that automatically reviews pull requests using Google's Gemini A
 
 ## Features
 
-- Review your PRs using Gemini API
-- Give use comments and suggestions to improve the source codes
+- Review your PRs using the Gemini API — a full comprehensive re-review on every push, not just the first
+- Inline, line-anchored comments with a concrete fix and a severity/priority tag
+- Adversarial verify pass that drops false-positive findings before posting
+- Replies in-thread when a human responds to one of its review comments
 
 ![Demo](assets/img/Demo.png)
 ![Demo2](assets/img/Demo2.png)
@@ -66,7 +68,7 @@ jobs:
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-2.5-pro # Optional, default is `gemini-2.5-flash`
+          GEMINI_MODEL: gemini-3-flash-preview # Optional, default is `gemini-3-flash-preview`
           EXCLUDE: "*.md,*.txt,package-lock.json,*.yml,*.yaml"
           SYSTEM_PROMPT: | # Optional: Custom system prompt for code reviews
             Review the code with the following guidelines:
@@ -120,7 +122,7 @@ jobs:
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-2.5-pro # Optional, default is `gemini-2.5-flash`
+          GEMINI_MODEL: gemini-3-flash-preview # Optional, default is `gemini-3-flash-preview`
           EXCLUDE: "*.md,*.txt,package-lock.json,*.yml,*.yaml"
           SYSTEM_PROMPT: | # Optional: Custom system prompt for code reviews
             Review the code with the following guidelines:
@@ -128,6 +130,39 @@ jobs:
             - Check for proper error handling
             - Ensure code follows best practices
             - Verify performance considerations
+```
+
+### Option 3: Reply to review threads
+
+The reviewer can also respond when a human **replies** to one of its own inline
+review comments — answering questions, conceding false positives, or holding the
+line with concrete evidence. Add a `pull_request_review_comment` trigger alongside
+your review workflow (it only acts on replies to threads it started, and never
+replies to itself):
+
+```yaml
+name: Gemini AI Code Reviewer — thread replies
+
+on:
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  gemini-thread-reply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: Thomasbehan/gemini-ai-code-reviewer@main
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 ```
 
 ## Configuration Options
@@ -156,9 +191,9 @@ Example usage in workflow inputs (maps to env):
     REVIEW_PRIORITY_THRESHOLD: high
     REVIEW_MODE: lenient
 ```
-- **GEMINI_MODEL**: The Gemini model to use for code review (default: `gemini-2.5-flash`)
-  - `gemini-2.5-flash` is a next-generation model offering speed and multimodal generation capabilities. It's suitable for a wide variety of tasks, including code generation, data extraction, and text editing.
-  - `gemini-2.5-pro` offers enhanced capabilities with longer context windows and better reasoning for complex code reviews.
+- **GEMINI_MODEL**: The Gemini model to use for code review (default: `gemini-3-flash-preview`)
+  - Flash models offer speed and multimodal capabilities suited to a wide variety of tasks, including code review.
+  - Pro models offer longer context windows and stronger reasoning for complex reviews.
   - For detailed information about available models, refer to [Gemini models](https://ai.google.dev/gemini-api/docs/models/gemini).
   
 - **EXCLUDE**: Comma-separated list of file patterns to exclude from review (e.g., `*.md,*.txt,package-lock.json`)
