@@ -16,41 +16,57 @@ __description__ = "AI-powered code review system using Google's Gemini AI"
 
 __all__ = [
     # Main classes
-    'Config', 'CodeReviewer', 'CodeReviewerError',
+    "Config",
+    "CodeReviewer",
+    "CodeReviewerError",
     # Data models
-    'PRDetails', 'ReviewResult', 'ReviewComment', 'DiffFile', 'FileInfo',
-    'HunkInfo', 'AnalysisContext', 'ProcessingStats', 'ReviewPriority', 'ReviewFocus',
+    "PRDetails",
+    "ReviewResult",
+    "ReviewComment",
+    "DiffFile",
+    "FileInfo",
+    "HunkInfo",
+    "AnalysisContext",
+    "ProcessingStats",
+    "ReviewPriority",
+    "ReviewFocus",
     # Client classes
-    'GitHubClient', 'GitHubClientError', 'GeminiClient', 'GeminiClientError',
-    'DiffParser', 'DiffParsingError', 'ContextBuilder', 'CommentProcessor',
+    "GitHubClient",
+    "GitHubClientError",
+    "GeminiClient",
+    "GeminiClientError",
+    "DiffParser",
+    "DiffParsingError",
+    "ContextBuilder",
+    "CommentProcessor",
 ]
 
 # Lazy import map: attribute -> (module_path, attr_name)
 _lazy_exports = {
     # Main classes
-    'Config': ('gemini_reviewer.config', 'Config'),
-    'CodeReviewer': ('gemini_reviewer.code_reviewer', 'CodeReviewer'),
-    'CodeReviewerError': ('gemini_reviewer.code_reviewer', 'CodeReviewerError'),
+    "Config": ("gemini_reviewer.config", "Config"),
+    "CodeReviewer": ("gemini_reviewer.code_reviewer", "CodeReviewer"),
+    "CodeReviewerError": ("gemini_reviewer.code_reviewer", "CodeReviewerError"),
     # Models
-    'PRDetails': ('gemini_reviewer.models', 'PRDetails'),
-    'ReviewResult': ('gemini_reviewer.models', 'ReviewResult'),
-    'ReviewComment': ('gemini_reviewer.models', 'ReviewComment'),
-    'DiffFile': ('gemini_reviewer.models', 'DiffFile'),
-    'FileInfo': ('gemini_reviewer.models', 'FileInfo'),
-    'HunkInfo': ('gemini_reviewer.models', 'HunkInfo'),
-    'AnalysisContext': ('gemini_reviewer.models', 'AnalysisContext'),
-    'ProcessingStats': ('gemini_reviewer.models', 'ProcessingStats'),
-    'ReviewPriority': ('gemini_reviewer.models', 'ReviewPriority'),
-    'ReviewFocus': ('gemini_reviewer.models', 'ReviewFocus'),
+    "PRDetails": ("gemini_reviewer.models", "PRDetails"),
+    "ReviewResult": ("gemini_reviewer.models", "ReviewResult"),
+    "ReviewComment": ("gemini_reviewer.models", "ReviewComment"),
+    "DiffFile": ("gemini_reviewer.models", "DiffFile"),
+    "FileInfo": ("gemini_reviewer.models", "FileInfo"),
+    "HunkInfo": ("gemini_reviewer.models", "HunkInfo"),
+    "AnalysisContext": ("gemini_reviewer.models", "AnalysisContext"),
+    "ProcessingStats": ("gemini_reviewer.models", "ProcessingStats"),
+    "ReviewPriority": ("gemini_reviewer.models", "ReviewPriority"),
+    "ReviewFocus": ("gemini_reviewer.models", "ReviewFocus"),
     # Clients and utilities
-    'GitHubClient': ('gemini_reviewer.github_client', 'GitHubClient'),
-    'GitHubClientError': ('gemini_reviewer.github_client', 'GitHubClientError'),
-    'GeminiClient': ('gemini_reviewer.gemini_client', 'GeminiClient'),
-    'GeminiClientError': ('gemini_reviewer.gemini_client', 'GeminiClientError'),
-    'DiffParser': ('gemini_reviewer.diff_parser', 'DiffParser'),
-    'DiffParsingError': ('gemini_reviewer.diff_parser', 'DiffParsingError'),
-    'ContextBuilder': ('gemini_reviewer.context_builder', 'ContextBuilder'),
-    'CommentProcessor': ('gemini_reviewer.comment_processor', 'CommentProcessor'),
+    "GitHubClient": ("gemini_reviewer.github_client", "GitHubClient"),
+    "GitHubClientError": ("gemini_reviewer.github_client", "GitHubClientError"),
+    "GeminiClient": ("gemini_reviewer.gemini_client", "GeminiClient"),
+    "GeminiClientError": ("gemini_reviewer.gemini_client", "GeminiClientError"),
+    "DiffParser": ("gemini_reviewer.diff_parser", "DiffParser"),
+    "DiffParsingError": ("gemini_reviewer.diff_parser", "DiffParsingError"),
+    "ContextBuilder": ("gemini_reviewer.context_builder", "ContextBuilder"),
+    "CommentProcessor": ("gemini_reviewer.comment_processor", "CommentProcessor"),
 }
 
 

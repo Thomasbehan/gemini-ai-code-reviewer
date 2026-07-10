@@ -3,19 +3,18 @@ Comprehensive tests for gemini_reviewer/config.py
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
 
 from gemini_reviewer.config import (
-    LogLevel,
-    GitHubConfig,
-    GeminiConfig,
-    ReviewConfig,
-    PerformanceConfig,
-    LoggingConfig,
     Config,
+    GeminiConfig,
+    GitHubConfig,
+    LoggingConfig,
+    LogLevel,
+    PerformanceConfig,
+    ReviewConfig,
 )
+from gemini_reviewer.models import ReviewFocus, ReviewPriority
 from gemini_reviewer.prompts import ReviewMode
-from gemini_reviewer.models import ReviewPriority, ReviewFocus
 
 
 class TestLogLevel:
@@ -361,9 +360,7 @@ class TestConfig:
 
     def test_get_review_prompt_template_with_custom(self, github_config, gemini_config):
         """Test get_review_prompt_template with custom template."""
-        review_config = ReviewConfig(
-            custom_prompt_template="Custom instructions here"
-        )
+        review_config = ReviewConfig(custom_prompt_template="Custom instructions here")
         config = Config(
             github=github_config,
             gemini=gemini_config,

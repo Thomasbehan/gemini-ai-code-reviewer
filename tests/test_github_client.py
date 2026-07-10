@@ -3,16 +3,17 @@ Comprehensive tests for gemini_reviewer/github_client.py
 """
 
 import json
-import pytest
-from unittest.mock import Mock, MagicMock, patch, mock_open
+from unittest.mock import Mock, mock_open, patch
 
+import pytest
+
+from gemini_reviewer.config import GitHubConfig
 from gemini_reviewer.github_client import (
     GitHubClient,
     GitHubClientError,
     PRNotFoundError,
     RateLimitError,
 )
-from gemini_reviewer.config import GitHubConfig
 from gemini_reviewer.models import PRDetails, ReviewComment, ReviewPriority
 
 
@@ -77,9 +78,7 @@ class TestGitHubClient:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_details_from_event_direct_pr(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_details_from_event_direct_pr(self, mock_session, mock_github, valid_config):
         """Test getting PR details from direct PR event."""
         event_data = {
             "number": 123,
@@ -107,9 +106,7 @@ class TestGitHubClient:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_details_from_event_comment_trigger(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_details_from_event_comment_trigger(self, mock_session, mock_github, valid_config):
         """Test getting PR details from comment trigger event."""
         event_data = {
             "issue": {
@@ -138,9 +135,7 @@ class TestGitHubClient:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_details_from_event_file_not_found(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_details_from_event_file_not_found(self, mock_session, mock_github, valid_config):
         """Test handling missing event file."""
         client = GitHubClient(valid_config)
 
@@ -149,9 +144,7 @@ class TestGitHubClient:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_success(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_diff_success(self, mock_session, mock_github, valid_config):
         """Test getting PR diff successfully."""
         mock_response = Mock()
         mock_response.status_code = 200
@@ -170,9 +163,7 @@ class TestGitHubClient:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_not_found(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_diff_not_found(self, mock_session, mock_github, valid_config):
         """Test handling PR not found when getting diff."""
         mock_response = Mock()
         mock_response.status_code = 404
@@ -190,9 +181,7 @@ class TestGitHubClient:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_invalid_params(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_diff_invalid_params(self, mock_session, mock_github, valid_config):
         """Test getting diff with invalid parameters."""
         client = GitHubClient(valid_config)
 
@@ -201,9 +190,7 @@ class TestGitHubClient:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_negative_pr_number(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_diff_negative_pr_number(self, mock_session, mock_github, valid_config):
         """Test getting diff with negative PR number."""
         client = GitHubClient(valid_config)
 
@@ -257,18 +244,14 @@ class TestGitHubClientReviews:
         mock_github.return_value.get_repo.return_value = mock_repo
 
         client = GitHubClient(valid_config)
-        result = client.create_review(
-            sample_pr_details, sample_comments, "COMMENT"
-        )
+        result = client.create_review(sample_pr_details, sample_comments, "COMMENT")
 
         assert result is True
         mock_pr.create_review.assert_called_once()
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_create_review_no_comments(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_create_review_no_comments(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test creating a review with no comments."""
         mock_review = Mock()
         mock_review.id = 1234
@@ -294,9 +277,7 @@ class TestGitHubClientSignatures:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_compute_signature(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_compute_signature(self, mock_session, mock_github, valid_config):
         """Test computing comment signature."""
         client = GitHubClient(valid_config)
 
@@ -309,9 +290,7 @@ class TestGitHubClientSignatures:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_normalize_for_signature(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_normalize_for_signature(self, mock_session, mock_github, valid_config):
         """Test normalizing text for signature."""
         client = GitHubClient(valid_config)
 
@@ -323,9 +302,7 @@ class TestGitHubClientSignatures:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_strip_signature_marker(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_strip_signature_marker(self, mock_session, mock_github, valid_config):
         """Test stripping signature marker from body."""
         client = GitHubClient(valid_config)
 
@@ -337,9 +314,7 @@ class TestGitHubClientSignatures:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_append_signature_marker(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_append_signature_marker(self, mock_session, mock_github, valid_config):
         """Test appending signature marker to body."""
         client = GitHubClient(valid_config)
 
@@ -350,9 +325,7 @@ class TestGitHubClientSignatures:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_append_signature_marker_already_has_marker(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_append_signature_marker_already_has_marker(self, mock_session, mock_github, valid_config):
         """Test not adding duplicate signature markers."""
         client = GitHubClient(valid_config)
 
@@ -373,9 +346,7 @@ class TestGitHubClientFileContent:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_file_content_success(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_file_content_success(self, mock_session, mock_github, valid_config):
         """Test getting file content successfully."""
         mock_content = Mock()
         mock_content.decoded_content = b"print('hello')"
@@ -390,9 +361,7 @@ class TestGitHubClientFileContent:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_file_content_not_found(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_file_content_not_found(self, mock_session, mock_github, valid_config):
         """Test handling file not found."""
         mock_repo = Mock()
         mock_repo.get_contents.side_effect = Exception("File not found")
@@ -414,9 +383,7 @@ class TestGitHubClientRateLimit:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_check_rate_limit_with_core(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_check_rate_limit_with_core(self, mock_session, mock_github, valid_config):
         """Test checking rate limit with core attribute."""
         mock_core = Mock()
         mock_core.limit = 5000
@@ -435,9 +402,7 @@ class TestGitHubClientRateLimit:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_check_rate_limit_error(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_check_rate_limit_error(self, mock_session, mock_github, valid_config):
         """Test handling rate limit check error."""
         mock_github.return_value.get_rate_limit.side_effect = Exception("API Error")
 
@@ -458,9 +423,7 @@ class TestGitHubClientSanitization:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_sanitize_input_normal_text(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_sanitize_input_normal_text(self, mock_session, mock_github, valid_config):
         """Test sanitizing normal text."""
         client = GitHubClient(valid_config)
 
@@ -469,9 +432,7 @@ class TestGitHubClientSanitization:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_sanitize_input_null_bytes(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_sanitize_input_null_bytes(self, mock_session, mock_github, valid_config):
         """Test removing null bytes."""
         client = GitHubClient(valid_config)
 
@@ -480,9 +441,7 @@ class TestGitHubClientSanitization:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_sanitize_input_control_chars(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_sanitize_input_control_chars(self, mock_session, mock_github, valid_config):
         """Test removing control characters."""
         client = GitHubClient(valid_config)
 
@@ -492,9 +451,7 @@ class TestGitHubClientSanitization:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_sanitize_input_preserves_newlines(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_sanitize_input_preserves_newlines(self, mock_session, mock_github, valid_config):
         """Test preserving newlines and tabs."""
         client = GitHubClient(valid_config)
 
@@ -504,9 +461,7 @@ class TestGitHubClientSanitization:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_sanitize_input_non_string(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_sanitize_input_non_string(self, mock_session, mock_github, valid_config):
         """Test handling non-string input."""
         client = GitHubClient(valid_config)
 
@@ -527,9 +482,7 @@ class TestGitHubClientClose:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_close(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_close(self, mock_session, mock_github, valid_config):
         """Test closing the client."""
         mock_session_instance = Mock()
         mock_session.return_value = mock_session_instance
@@ -581,9 +534,7 @@ class TestGitHubClientLastReviewedCommit:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_last_reviewed_commit_sha_with_review(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_last_reviewed_commit_sha_with_review(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test when there is a prior bot review."""
         from datetime import datetime
 
@@ -613,9 +564,7 @@ class TestGitHubClientLastReviewedCommit:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_last_reviewed_commit_sha_no_commits(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_last_reviewed_commit_sha_no_commits(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test when PR has no commits."""
         mock_pr = Mock()
         mock_pr.get_commits.return_value = []
@@ -631,9 +580,7 @@ class TestGitHubClientLastReviewedCommit:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_last_reviewed_commit_sha_exception(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_last_reviewed_commit_sha_exception(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test handling exceptions."""
         mock_github.return_value.get_repo.side_effect = Exception("API Error")
 
@@ -658,9 +605,7 @@ class TestGitHubClientDiffSince:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_since_no_base_sha(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_pr_diff_since_no_base_sha(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test when base_sha is not provided."""
         client = GitHubClient(valid_config)
         result = client.get_pr_diff_since(sample_pr_details, "")
@@ -669,9 +614,7 @@ class TestGitHubClientDiffSince:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_since_same_sha(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_pr_diff_since_same_sha(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test when base equals head."""
         mock_pr = Mock()
         mock_pr.head.sha = "abc123"
@@ -688,9 +631,7 @@ class TestGitHubClientDiffSince:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_since_success(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_pr_diff_since_success(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test successful incremental diff."""
         mock_response = Mock()
         mock_response.status_code = 200
@@ -712,9 +653,7 @@ class TestGitHubClientDiffSince:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_since_api_failure_fallback(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_pr_diff_since_api_failure_fallback(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test fallback when compare API fails."""
         mock_response = Mock()
         mock_response.status_code = 404
@@ -749,9 +688,7 @@ class TestGitHubClientIncrementalDiff:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_incremental_diff_no_base_sha(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_incremental_diff_no_base_sha(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test when base_sha is not provided."""
         client = GitHubClient(valid_config)
         result = client.get_incremental_diff_by_commits(sample_pr_details, "")
@@ -760,9 +697,7 @@ class TestGitHubClientIncrementalDiff:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_incremental_diff_no_commits(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_incremental_diff_no_commits(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test when PR has no commits."""
         mock_pr = Mock()
         mock_pr.get_commits.return_value = []
@@ -778,9 +713,7 @@ class TestGitHubClientIncrementalDiff:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_incremental_diff_with_commits(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_incremental_diff_with_commits(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test building diff from commits."""
         mock_commit1 = Mock()
         mock_commit1.sha = "base123"
@@ -821,9 +754,7 @@ class TestGitHubClientReviewMessages:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_generate_review_summary(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_generate_review_summary(self, mock_session, mock_github, valid_config):
         """Test generating review summary."""
         client = GitHubClient(valid_config)
 
@@ -839,9 +770,7 @@ class TestGitHubClientReviewMessages:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_generate_approval_message(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_generate_approval_message(self, mock_session, mock_github, valid_config):
         """Test generating approval message."""
         client = GitHubClient(valid_config)
         result = client._generate_approval_message()
@@ -850,9 +779,7 @@ class TestGitHubClientReviewMessages:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_generate_filtered_message(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_generate_filtered_message(self, mock_session, mock_github, valid_config):
         """Test generating filtered message."""
         client = GitHubClient(valid_config)
         result = client._generate_filtered_message(5)
@@ -876,9 +803,7 @@ class TestGitHubClientExistingComments:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_existing_comment_signatures(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_existing_comment_signatures(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test getting existing comment signatures."""
         mock_comment = Mock()
         mock_comment.path = "file.py"
@@ -898,9 +823,7 @@ class TestGitHubClientExistingComments:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_existing_bot_comments(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_existing_bot_comments(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test getting existing bot comments."""
         mock_comment = Mock()
         mock_comment.path = "file.py"
@@ -928,9 +851,7 @@ class TestGitHubClientExistingComments:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_filter_out_existing_comments(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_filter_out_existing_comments(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test filtering out existing comments."""
         mock_pr = Mock()
         mock_pr.get_review_comments.return_value = []
@@ -960,9 +881,7 @@ class TestGitHubClientValidation:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_validate_and_sanitize_comment_valid(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_validate_and_sanitize_comment_valid(self, mock_session, mock_github, valid_config):
         """Test validating a valid comment."""
         client = GitHubClient(valid_config)
 
@@ -970,15 +889,13 @@ class TestGitHubClientValidation:
         result = client._validate_and_sanitize_comment(comment)
 
         assert result is not None
-        assert result['body'] is not None
-        assert result['path'] == "file.py"
-        assert result['position'] == 10
+        assert result["body"] is not None
+        assert result["path"] == "file.py"
+        assert result["position"] == 10
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_validate_and_sanitize_comment_missing_body(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_validate_and_sanitize_comment_missing_body(self, mock_session, mock_github, valid_config):
         """Test validating comment with missing body."""
         client = GitHubClient(valid_config)
 
@@ -989,9 +906,7 @@ class TestGitHubClientValidation:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_validate_and_sanitize_comment_invalid_position(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_validate_and_sanitize_comment_invalid_position(self, mock_session, mock_github, valid_config):
         """Test validating comment with invalid position."""
         client = GitHubClient(valid_config)
 
@@ -1016,9 +931,7 @@ class TestGitHubClientCreateReview:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_create_review_with_filtered_comments(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_create_review_with_filtered_comments(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test creating review when comments were filtered."""
         mock_review = Mock()
         mock_review.id = 1234
@@ -1029,17 +942,13 @@ class TestGitHubClientCreateReview:
         mock_github.return_value.get_repo.return_value = mock_repo
 
         client = GitHubClient(valid_config)
-        result = client.create_review(
-            sample_pr_details, [], "COMMENT", total_comments_generated=5
-        )
+        result = client.create_review(sample_pr_details, [], "COMMENT", total_comments_generated=5)
 
         assert result is True
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_create_review_approve_fallback(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_create_review_approve_fallback(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test fallback to COMMENT when APPROVE fails."""
         mock_review = Mock()
         mock_review.id = 1234
@@ -1051,17 +960,13 @@ class TestGitHubClientCreateReview:
         mock_github.return_value.get_repo.return_value = mock_repo
 
         client = GitHubClient(valid_config)
-        result = client.create_review(
-            sample_pr_details, [], "APPROVE"
-        )
+        result = client.create_review(sample_pr_details, [], "APPROVE")
 
         assert result is True
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_create_review_invalid_comment_type(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_create_review_invalid_comment_type(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test handling invalid comment types."""
         mock_review = Mock()
         mock_review.id = 1234
@@ -1073,9 +978,7 @@ class TestGitHubClientCreateReview:
 
         client = GitHubClient(valid_config)
         # Pass invalid comment type
-        result = client.create_review(
-            sample_pr_details, ["invalid"], "COMMENT"
-        )
+        result = client.create_review(sample_pr_details, ["invalid"], "COMMENT")
 
         assert result is True
 
@@ -1090,9 +993,7 @@ class TestGitHubClientRateLimitDiff:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_rate_limit(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_diff_rate_limit(self, mock_session, mock_github, valid_config):
         """Test handling rate limit error."""
         mock_response = Mock()
         mock_response.status_code = 403
@@ -1112,9 +1013,7 @@ class TestGitHubClientRateLimitDiff:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_forbidden_not_rate_limit(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_diff_forbidden_not_rate_limit(self, mock_session, mock_github, valid_config):
         """Test handling 403 that is not rate limit."""
         mock_response = Mock()
         mock_response.status_code = 403
@@ -1142,9 +1041,7 @@ class TestGitHubClientEventHandling:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_details_from_event_invalid_repo(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_details_from_event_invalid_repo(self, mock_session, mock_github, valid_config):
         """Test handling invalid repository name."""
         event_data = {
             "number": 123,
@@ -1159,9 +1056,7 @@ class TestGitHubClientEventHandling:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_details_from_event_api_error(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_details_from_event_api_error(self, mock_session, mock_github, valid_config):
         """Test handling API error when getting PR details."""
         event_data = {
             "number": 123,
@@ -1193,7 +1088,7 @@ class TestGitHubClientAdvanced:
         mock_session_instance.headers = Mock()
         mock_session.return_value = mock_session_instance
 
-        client = GitHubClient(valid_config)
+        GitHubClient(valid_config)
 
         # Verify headers.update was called
         mock_session_instance.headers.update.assert_called()
@@ -1241,9 +1136,7 @@ class TestGitHubClientAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_filter_out_existing_comments_removes_duplicates(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_filter_out_existing_comments_removes_duplicates(self, mock_session, mock_github, valid_config):
         """Test that existing comment signatures are filtered."""
         client = GitHubClient(valid_config)
 
@@ -1289,6 +1182,7 @@ class TestGitHubClientAdvanced:
     def test_get_file_content_not_found(self, mock_session, mock_github, valid_config):
         """Test getting file content when file not found."""
         from github import UnknownObjectException
+
         mock_repo = Mock()
         mock_repo.get_contents.side_effect = UnknownObjectException(404, None, None)
         mock_github.return_value.get_repo.return_value = mock_repo
@@ -1586,9 +1480,7 @@ class TestGetPrDiff406Fallback:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_406_falls_back_to_files_api(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_diff_406_falls_back_to_files_api(self, mock_session, mock_github, valid_config):
         """Test that 406 from .diff endpoint falls back to PR files API."""
         mock_response = Mock()
         mock_response.status_code = 406
@@ -1616,9 +1508,7 @@ class TestGetPrDiff406Fallback:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_406_fallback_skips_binary_files(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_get_pr_diff_406_fallback_skips_binary_files(self, mock_session, mock_github, valid_config):
         """Test that binary files (no patch) are skipped in the fallback."""
         mock_response = Mock()
         mock_response.status_code = 406
@@ -1728,7 +1618,9 @@ class TestGitHubClientCommentReplies:
     @patch("gemini_reviewer.github_client.requests.get")
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_comment_replies_same_thread(self, mock_session, mock_github, mock_get, valid_config, sample_pr_details):
+    def test_get_comment_replies_same_thread(
+        self, mock_session, mock_github, mock_get, valid_config, sample_pr_details
+    ):
         """Test getting replies in the same thread."""
         mock_response = Mock()
         mock_response.status_code = 200
@@ -1762,7 +1654,9 @@ class TestGitHubClientReplyToComment:
     @patch("gemini_reviewer.github_client.requests.get")
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_reply_to_comment_success(self, mock_session, mock_github, mock_get, mock_post, valid_config, sample_pr_details):
+    def test_reply_to_comment_success(
+        self, mock_session, mock_github, mock_get, mock_post, valid_config, sample_pr_details
+    ):
         """Test replying to comment successfully."""
         # Mock get_comment_replies returns empty (no existing reply)
         mock_get_response = Mock()
@@ -1785,7 +1679,9 @@ class TestGitHubClientReplyToComment:
     @patch("gemini_reviewer.github_client.requests.get")
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_reply_to_comment_already_exists(self, mock_session, mock_github, mock_get, mock_post, valid_config, sample_pr_details):
+    def test_reply_to_comment_already_exists(
+        self, mock_session, mock_github, mock_get, mock_post, valid_config, sample_pr_details
+    ):
         """Test skipping duplicate reply."""
         # Mock get_comment_replies returns the target comment and an existing reply with same body
         mock_get_response = Mock()
@@ -1806,7 +1702,9 @@ class TestGitHubClientReplyToComment:
     @patch("gemini_reviewer.github_client.requests.get")
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_reply_to_comment_api_failure(self, mock_session, mock_github, mock_get, mock_post, valid_config, sample_pr_details):
+    def test_reply_to_comment_api_failure(
+        self, mock_session, mock_github, mock_get, mock_post, valid_config, sample_pr_details
+    ):
         """Test handling API failure in reply_to_comment."""
         mock_get_response = Mock()
         mock_get_response.status_code = 200
@@ -2105,9 +2003,7 @@ class TestGitHubClientLastReviewedAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_last_reviewed_commit_issue_comment(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_last_reviewed_commit_issue_comment(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test finding bot review via issue comment."""
         from datetime import datetime
 
@@ -2140,9 +2036,7 @@ class TestGitHubClientLastReviewedAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_last_reviewed_commit_no_mapping(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_last_reviewed_commit_no_mapping(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test when review time cannot be mapped to any commit."""
         from datetime import datetime
 
@@ -2188,9 +2082,7 @@ class TestGitHubClientIncrementalDiffAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_incremental_diff_base_not_found(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_incremental_diff_base_not_found(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test when base SHA is not found in PR commits."""
         mock_commit = Mock()
         mock_commit.sha = "different_sha"
@@ -2220,9 +2112,7 @@ class TestGitHubClientIncrementalDiffAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_incremental_diff_added_file(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_incremental_diff_added_file(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test diff for added file."""
         mock_commit1 = Mock()
         mock_commit1.sha = "base_sha"
@@ -2254,9 +2144,7 @@ class TestGitHubClientIncrementalDiffAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_incremental_diff_removed_file(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_incremental_diff_removed_file(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test diff for removed file."""
         mock_commit1 = Mock()
         mock_commit1.sha = "base_sha"
@@ -2288,9 +2176,7 @@ class TestGitHubClientIncrementalDiffAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_incremental_diff_renamed_file(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_incremental_diff_renamed_file(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test diff for renamed file."""
         mock_commit1 = Mock()
         mock_commit1.sha = "base_sha"
@@ -2322,9 +2208,7 @@ class TestGitHubClientIncrementalDiffAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_incremental_diff_commit_exception(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_incremental_diff_commit_exception(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test handling exception when getting commit."""
         mock_commit1 = Mock()
         mock_commit1.sha = "base_sha"
@@ -2347,9 +2231,7 @@ class TestGitHubClientIncrementalDiffAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_incremental_diff_exception(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_incremental_diff_exception(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test handling exception in get_incremental_diff_by_commits."""
         mock_github.return_value.get_repo.side_effect = Exception("API error")
 
@@ -2424,9 +2306,7 @@ class TestGitHubClientFilterDedupe:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_filter_exception_returns_original(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_filter_exception_returns_original(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test that exception in filter returns original comments."""
         mock_github.return_value.get_repo.side_effect = Exception("API error")
 
@@ -2457,9 +2337,7 @@ class TestGitHubClientDiffSinceAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_since_empty_compare(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_pr_diff_since_empty_compare(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test when compare API returns empty diff."""
         mock_response = Mock()
         mock_response.status_code = 200
@@ -2509,9 +2387,7 @@ class TestGitHubClientDiffSinceAdvanced:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_pr_diff_since_exception(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_pr_diff_since_exception(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test exception handling in get_pr_diff_since."""
         mock_github.return_value.get_repo.side_effect = Exception("API error")
 
@@ -2571,9 +2447,7 @@ class TestGitHubClientExistingBotComments:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_existing_bot_comments_exception(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_existing_bot_comments_exception(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test handling exception in get_existing_bot_comments."""
         mock_github.return_value.get_repo.side_effect = Exception("API error")
 
@@ -2584,9 +2458,7 @@ class TestGitHubClientExistingBotComments:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_get_existing_bot_comments_user_error(
-        self, mock_session, mock_github, valid_config, sample_pr_details
-    ):
+    def test_get_existing_bot_comments_user_error(self, mock_session, mock_github, valid_config, sample_pr_details):
         """Test when get_user fails."""
         mock_pr = Mock()
         mock_pr.get_review_comments.return_value = []
@@ -2678,9 +2550,7 @@ class TestGitHubClientExistingBotComments:
         root_comment_2.user.login = "github-actions[bot]"
 
         mock_pr = Mock()
-        mock_pr.get_review_comments.return_value = [
-            root_comment, followup_reply, resolution_reply, root_comment_2
-        ]
+        mock_pr.get_review_comments.return_value = [root_comment, followup_reply, resolution_reply, root_comment_2]
         mock_repo = Mock()
         mock_repo.get_pull.return_value = mock_pr
         mock_github.return_value.get_repo.return_value = mock_repo
@@ -2691,14 +2561,12 @@ class TestGitHubClientExistingBotComments:
 
         # Both root comments kept, both replies filtered out
         assert len(result) == 2
-        result_ids = {r['id'] for r in result}
+        result_ids = {r["id"] for r in result}
         assert result_ids == {100, 200}
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_review_summary_includes_executive_summary(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_review_summary_includes_executive_summary(self, mock_session, mock_github, valid_config):
         """Test that review summary includes key findings for critical/high comments."""
         client = GitHubClient(valid_config)
 
@@ -2708,21 +2576,17 @@ class TestGitHubClientExistingBotComments:
                 path="src/config/secrets.py",
                 position=5,
                 priority=ReviewPriority.CRITICAL,
-                category="security"
+                category="security",
             ),
             ReviewComment(
                 body="Missing null check causes panic",
                 path="src/handlers/api.go",
                 position=10,
                 priority=ReviewPriority.HIGH,
-                category="bug"
+                category="bug",
             ),
             ReviewComment(
-                body="Minor style issue",
-                path="src/utils.py",
-                position=3,
-                priority=ReviewPriority.LOW,
-                category="style"
+                body="Minor style issue", path="src/utils.py", position=3, priority=ReviewPriority.LOW, category="style"
             ),
         ]
 
@@ -2737,11 +2601,10 @@ class TestGitHubClientExistingBotComments:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_gordon_mode_review_summary(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_gordon_mode_review_summary(self, mock_session, mock_github, valid_config):
         """Test that Gordon mode produces Ramsay-style summary."""
         import os
+
         os.environ["REVIEW_MODE_GORDON"] = "true"
         try:
             client = GitHubClient(valid_config)
@@ -2752,14 +2615,14 @@ class TestGitHubClientExistingBotComments:
                     path="src/handler.go",
                     position=5,
                     priority=ReviewPriority.CRITICAL,
-                    category="bug"
+                    category="bug",
                 ),
                 ReviewComment(
                     body="Missing input validation on user data",
                     path="src/api.go",
                     position=10,
                     priority=ReviewPriority.HIGH,
-                    category="security"
+                    category="security",
                 ),
             ]
 
@@ -2778,21 +2641,16 @@ class TestGitHubClientExistingBotComments:
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_gordon_mode_off_by_default(
-        self, mock_session, mock_github, valid_config
-    ):
+    def test_gordon_mode_off_by_default(self, mock_session, mock_github, valid_config):
         """Test that Gordon mode is not active by default."""
         import os
+
         os.environ.pop("REVIEW_MODE_GORDON", None)
         client = GitHubClient(valid_config)
 
         comments = [
             ReviewComment(
-                body="Bug found",
-                path="src/main.go",
-                position=5,
-                priority=ReviewPriority.HIGH,
-                category="bug"
+                body="Bug found", path="src/main.go", position=5, priority=ReviewPriority.HIGH, category="bug"
             ),
         ]
 
@@ -2827,11 +2685,25 @@ class TestGitHubClientReviewCommentThread:
         resp = Mock()
         resp.status_code = 200
         resp.json.return_value = [
-            {"id": 100, "path": "f.py", "position": 3, "in_reply_to_id": None,
-             "diff_hunk": "@@ -1 +1 @@\n+x", "created_at": "2026-01-01T00:00:00Z",
-             "body": "Bug here <!-- AI-SIG:abc123 -->", "user": {"login": "gemini-bot"}},
-            {"id": 101, "path": "f.py", "position": 3, "in_reply_to_id": 100,
-             "created_at": "2026-01-02T00:00:00Z", "body": "Are you sure?", "user": {"login": "alice"}},
+            {
+                "id": 100,
+                "path": "f.py",
+                "position": 3,
+                "in_reply_to_id": None,
+                "diff_hunk": "@@ -1 +1 @@\n+x",
+                "created_at": "2026-01-01T00:00:00Z",
+                "body": "Bug here <!-- AI-SIG:abc123 -->",
+                "user": {"login": "gemini-bot"},
+            },
+            {
+                "id": 101,
+                "path": "f.py",
+                "position": 3,
+                "in_reply_to_id": 100,
+                "created_at": "2026-01-02T00:00:00Z",
+                "body": "Are you sure?",
+                "user": {"login": "alice"},
+            },
         ]
         mock_get.return_value = resp
 
@@ -2849,15 +2721,32 @@ class TestGitHubClientReviewCommentThread:
     @patch("gemini_reviewer.github_client.requests.get")
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_thread_walks_to_root_from_reply_id(self, mock_session, mock_github, mock_get, valid_config, sample_pr_details):
+    def test_thread_walks_to_root_from_reply_id(
+        self, mock_session, mock_github, mock_get, valid_config, sample_pr_details
+    ):
         self._bot_login_mock(mock_github)
         resp = Mock()
         resp.status_code = 200
         resp.json.return_value = [
-            {"id": 100, "path": "f.py", "position": 3, "in_reply_to_id": None,
-             "diff_hunk": "hunk", "created_at": "t1", "body": "root", "user": {"login": "gemini-bot"}},
-            {"id": 101, "path": "f.py", "position": 3, "in_reply_to_id": 100,
-             "created_at": "t2", "body": "mid", "user": {"login": "alice"}},
+            {
+                "id": 100,
+                "path": "f.py",
+                "position": 3,
+                "in_reply_to_id": None,
+                "diff_hunk": "hunk",
+                "created_at": "t1",
+                "body": "root",
+                "user": {"login": "gemini-bot"},
+            },
+            {
+                "id": 101,
+                "path": "f.py",
+                "position": 3,
+                "in_reply_to_id": 100,
+                "created_at": "t2",
+                "body": "mid",
+                "user": {"login": "alice"},
+            },
         ]
         mock_get.return_value = resp
         client = GitHubClient(valid_config)
@@ -2878,7 +2767,9 @@ class TestGitHubClientReviewCommentThread:
     @patch("gemini_reviewer.github_client.requests.get")
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_thread_target_missing_returns_none(self, mock_session, mock_github, mock_get, valid_config, sample_pr_details):
+    def test_thread_target_missing_returns_none(
+        self, mock_session, mock_github, mock_get, valid_config, sample_pr_details
+    ):
         resp = Mock()
         resp.status_code = 200
         resp.json.return_value = [{"id": 999, "in_reply_to_id": None, "body": "x", "user": {"login": "a"}}]
@@ -2897,16 +2788,33 @@ class TestGitHubClientReviewCommentThread:
     @patch("gemini_reviewer.github_client.requests.get")
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
-    def test_thread_bot_login_none_uses_marker_and_bot_suffix(self, mock_session, mock_github, mock_get, valid_config, sample_pr_details):
+    def test_thread_bot_login_none_uses_marker_and_bot_suffix(
+        self, mock_session, mock_github, mock_get, valid_config, sample_pr_details
+    ):
         # get_user raises -> bot_login None; is_bot falls back to marker + [bot] suffix.
         mock_github.return_value.get_user.side_effect = Exception("no user")
         resp = Mock()
         resp.status_code = 200
         resp.json.return_value = [
-            {"id": 100, "path": "f.py", "position": 3, "in_reply_to_id": None,
-             "diff_hunk": "h", "created_at": "t1", "body": "root <!-- AI-SIG:deadbe -->", "user": {"login": "some-app[bot]"}},
-            {"id": 101, "path": "f.py", "position": 3, "in_reply_to_id": 100,
-             "created_at": "t2", "body": "human reply", "user": {"login": "alice"}},
+            {
+                "id": 100,
+                "path": "f.py",
+                "position": 3,
+                "in_reply_to_id": None,
+                "diff_hunk": "h",
+                "created_at": "t1",
+                "body": "root <!-- AI-SIG:deadbe -->",
+                "user": {"login": "some-app[bot]"},
+            },
+            {
+                "id": 101,
+                "path": "f.py",
+                "position": 3,
+                "in_reply_to_id": 100,
+                "created_at": "t2",
+                "body": "human reply",
+                "user": {"login": "alice"},
+            },
         ]
         mock_get.return_value = resp
         client = GitHubClient(valid_config)

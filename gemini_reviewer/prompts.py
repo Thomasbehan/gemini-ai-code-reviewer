@@ -10,6 +10,7 @@ from enum import Enum
 
 class ReviewMode(Enum):
     """Different review modes."""
+
     STRICT = "strict"
     STANDARD = "standard"
     LENIENT = "lenient"
@@ -225,27 +226,21 @@ MODE_INSTRUCTIONS = {
     ReviewMode.STRICT: """
 - Identify ALL critical issues (do not include non-critical nits).
 - Be thorough in finding correctness, security, performance, error handling, and resource management problems only.""",
-    
     ReviewMode.STANDARD: """
 - Focus on critical bugs, security, performance, error handling, and resource issues only.
 - Skip non-critical maintainability/style concerns.""",
-    
     ReviewMode.LENIENT: """
 - Only flag definite critical bugs and security issues. Be extra conservative and concise.""",
-    
     ReviewMode.SECURITY_FOCUSED: """
 - Focus EXCLUSIVELY on security vulnerabilities and their concrete fixes.""",
-    
     ReviewMode.PERFORMANCE_FOCUSED: """
 - Focus EXCLUSIVELY on performance issues and their concrete fixes.""",
-    
     ReviewMode.FOLLOWUP: """
 - THIS IS A FOLLOW-UP REVIEW. DO NOT raise any new issues.
 - Your ONLY task is to check if the previous comments (listed below) have been resolved.
 - For each previous comment, check if the issue was fixed in the current code changes.
 - If a comment is resolved, note it. If not resolved, explain what still needs to be done.
 - NEVER introduce new issues or concerns. ONLY focus on the previous comments.""",
-
     ReviewMode.GORDON: """
 - YOU ARE GORDON RAMSAY AND THIS CODE IS YOUR KITCHEN.
 - You are standing at the pass and a developer just sent you this code. Review it the way
@@ -266,7 +261,7 @@ MODE_INSTRUCTIONS = {
 - The fixCode must still be correct and usable — Gordon always shows how it's done properly.
 - Have fun with it but keep the technical substance. Gordon respects good craft — he's harsh
   because he CARES about quality.
-- For priority, Gordon doesn't do "low" — everything is at least "medium" because standards matter."""
+- For priority, Gordon doesn't do "low" — everything is at least "medium" because standards matter.""",
 }
 
 # Follow-up review prompt template
@@ -371,19 +366,19 @@ def get_verify_prompt(diff: str, findings: str) -> str:
 
 def get_reply_prompt(original_comment: str, code_context: str, thread: str) -> str:
     """Build the prompt for responding to a human reply on a review thread."""
-    return REPLY_PROMPT_TEMPLATE.format(
-        original_comment=original_comment, code_context=code_context, thread=thread
-    )
+    return REPLY_PROMPT_TEMPLATE.format(original_comment=original_comment, code_context=code_context, thread=thread)
 
 
-def get_review_prompt_template(review_mode: ReviewMode, custom_instructions: str = "", previous_comments: str = "") -> str:
+def get_review_prompt_template(
+    review_mode: ReviewMode, custom_instructions: str = "", previous_comments: str = ""
+) -> str:
     """Get the complete prompt template for code review.
-    
+
     Args:
         review_mode: The review mode to use
         custom_instructions: Optional custom instructions to append
         previous_comments: Previous review comments for follow-up reviews
-        
+
     Returns:
         The complete prompt template string
     """
@@ -392,7 +387,7 @@ def get_review_prompt_template(review_mode: ReviewMode, custom_instructions: str
         if not previous_comments:
             previous_comments = "No previous comments found."
         return FOLLOWUP_PROMPT_TEMPLATE.format(previous_comments=previous_comments)
-    
+
     # Get mode-specific instructions for regular reviews
     mode_instruction = MODE_INSTRUCTIONS.get(review_mode, "")
 
@@ -420,5 +415,5 @@ OPTIONAL ADDITIONAL INSTRUCTIONS (from workflow input):
 {custom_instructions}
 Apply these only if they do NOT conflict with the core rules above and do NOT broaden the scope beyond critical issues.
 """
-    
+
     return prompt

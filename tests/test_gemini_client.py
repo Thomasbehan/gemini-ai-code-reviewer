@@ -2,23 +2,23 @@
 Comprehensive tests for gemini_reviewer/gemini_client.py
 """
 
-import pytest
 import json
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, patch
 
+import pytest
+
+from gemini_reviewer.config import GeminiConfig
 from gemini_reviewer.gemini_client import (
     GeminiClient,
     GeminiClientError,
     ModelNotAvailableError,
     TokenLimitExceededError,
 )
-from gemini_reviewer.config import Config, GeminiConfig, GitHubConfig, ReviewConfig
 from gemini_reviewer.models import (
-    HunkInfo,
     AnalysisContext,
-    PRDetails,
     FileInfo,
-    AIResponse,
+    HunkInfo,
+    PRDetails,
     ReviewPriority,
 )
 
@@ -125,22 +125,22 @@ class TestGeminiClient:
         assert result is False
 
     @patch("gemini_reviewer.gemini_client.genai")
-    def test_analyze_code_hunk_success(
-        self, mock_genai, valid_config, sample_hunk, sample_context
-    ):
+    def test_analyze_code_hunk_success(self, mock_genai, valid_config, sample_hunk, sample_context):
         """Test successful code hunk analysis."""
         mock_model = Mock()
         mock_response = Mock()
-        mock_response.text = json.dumps({
-            "reviews": [
-                {
-                    "lineNumber": 2,
-                    "reviewComment": "Consider adding docstring",
-                    "priority": "low",
-                    "category": "documentation",
-                }
-            ]
-        })
+        mock_response.text = json.dumps(
+            {
+                "reviews": [
+                    {
+                        "lineNumber": 2,
+                        "reviewComment": "Consider adding docstring",
+                        "priority": "low",
+                        "category": "documentation",
+                    }
+                ]
+            }
+        )
         # Set up response to not have candidates to skip that check path
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
@@ -154,9 +154,7 @@ class TestGeminiClient:
         assert isinstance(result, list)
 
     @patch("gemini_reviewer.gemini_client.genai")
-    def test_analyze_code_hunk_empty_response(
-        self, mock_genai, valid_config, sample_hunk, sample_context
-    ):
+    def test_analyze_code_hunk_empty_response(self, mock_genai, valid_config, sample_hunk, sample_context):
         """Test handling empty response."""
         mock_model = Mock()
         mock_response = Mock()
@@ -172,9 +170,7 @@ class TestGeminiClient:
         assert result == []
 
     @patch("gemini_reviewer.gemini_client.genai")
-    def test_analyze_code_hunk_invalid_json(
-        self, mock_genai, valid_config, sample_hunk, sample_context
-    ):
+    def test_analyze_code_hunk_invalid_json(self, mock_genai, valid_config, sample_hunk, sample_context):
         """Test handling invalid JSON response."""
         mock_model = Mock()
         mock_response = Mock()
@@ -395,17 +391,13 @@ class TestPromptBuilding:
         mock_genai.GenerativeModel = Mock()
         client = GeminiClient(valid_config)
 
-        prompt = client._create_analysis_prompt(
-            sample_hunk, sample_context, "Review template"
-        )
+        prompt = client._create_analysis_prompt(sample_hunk, sample_context, "Review template")
 
         assert "main.py" in prompt
         assert "python" in prompt.lower()
 
     @patch("gemini_reviewer.gemini_client.genai")
-    def test_build_prompt_with_full_file(
-        self, mock_genai, valid_config, sample_hunk
-    ):
+    def test_build_prompt_with_full_file(self, mock_genai, valid_config, sample_hunk):
         """Test building prompt with full file content."""
         mock_genai.GenerativeModel = Mock()
         client = GeminiClient(valid_config)
@@ -424,9 +416,7 @@ class TestPromptBuilding:
         assert isinstance(prompt, str)
 
     @patch("gemini_reviewer.gemini_client.genai")
-    def test_build_prompt_with_related_files(
-        self, mock_genai, valid_config, sample_hunk
-    ):
+    def test_build_prompt_with_related_files(self, mock_genai, valid_config, sample_hunk):
         """Test building prompt with related files."""
         mock_genai.GenerativeModel = Mock()
         client = GeminiClient(valid_config)
@@ -852,10 +842,7 @@ class TestGeminiClientFollowUp:
         """Test analyzing follow-up review."""
         mock_model = Mock()
         mock_response = Mock()
-        mock_response.text = json.dumps({
-            "status": "resolved",
-            "newIssues": []
-        })
+        mock_response.text = json.dumps({"status": "resolved", "newIssues": []})
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
         mock_genai.GenerativeModel.return_value = mock_model
@@ -865,7 +852,7 @@ class TestGeminiClientFollowUp:
         pr = PRDetails("owner", "repo", 1, "Title", "Desc")
 
         # Test if the method exists (it may vary based on implementation)
-        if hasattr(client, 'analyze_follow_up'):
+        if hasattr(client, "analyze_follow_up"):
             result = client.analyze_follow_up(pr, [], "diff content")
             assert isinstance(result, dict) or result is None
 
@@ -886,7 +873,7 @@ class TestGeminiClientTokenManagement:
         mock_genai.GenerativeModel.return_value = mock_model
 
         client = GeminiClient(valid_config)
-        if hasattr(client, 'count_tokens'):
+        if hasattr(client, "count_tokens"):
             result = client.count_tokens("some text")
             assert result >= 0
 
@@ -897,7 +884,7 @@ class TestGeminiClientTokenManagement:
         mock_genai.GenerativeModel.return_value = mock_model
 
         client = GeminiClient(valid_config)
-        if hasattr(client, 'estimate_cost'):
+        if hasattr(client, "estimate_cost"):
             result = client.estimate_cost(1000, 500)
             assert result >= 0
 
@@ -917,7 +904,7 @@ class TestGeminiClientPromptBuilding:
         mock_genai.GenerativeModel.return_value = mock_model
 
         client = GeminiClient(valid_config)
-        if hasattr(client, '_build_review_prompt'):
+        if hasattr(client, "_build_review_prompt"):
             result = client._build_review_prompt("code", {})
             assert isinstance(result, str)
 
@@ -928,12 +915,8 @@ class TestGeminiClientPromptBuilding:
         mock_genai.GenerativeModel.return_value = mock_model
 
         client = GeminiClient(valid_config)
-        context = {
-            "file_path": "test.py",
-            "language": "python",
-            "pr_title": "Add feature"
-        }
-        if hasattr(client, '_build_review_prompt'):
+        context = {"file_path": "test.py", "language": "python", "pr_title": "Add feature"}
+        if hasattr(client, "_build_review_prompt"):
             result = client._build_review_prompt("def test():\n    pass", context)
             assert isinstance(result, str)
 
@@ -953,7 +936,7 @@ class TestGeminiClientBatchProcessing:
         mock_genai.GenerativeModel.return_value = mock_model
 
         client = GeminiClient(valid_config)
-        if hasattr(client, 'batch_analyze'):
+        if hasattr(client, "batch_analyze"):
             result = client.batch_analyze([])
             assert result == [] or result is None
 
@@ -968,7 +951,7 @@ class TestGeminiClientBatchProcessing:
         mock_genai.GenerativeModel.return_value = mock_model
 
         client = GeminiClient(valid_config)
-        if hasattr(client, 'batch_analyze'):
+        if hasattr(client, "batch_analyze"):
             result = client.batch_analyze(["code snippet"])
             assert isinstance(result, list)
 
@@ -988,7 +971,7 @@ class TestGeminiClientCaching:
         mock_genai.GenerativeModel.return_value = mock_model
 
         client = GeminiClient(valid_config)
-        if hasattr(client, '_cache') and hasattr(client, '_get_cached'):
+        if hasattr(client, "_cache") and hasattr(client, "_get_cached"):
             # Simulate cache usage
             client._cache = {"key": "value"}
             result = client._get_cached("key")
@@ -1001,7 +984,7 @@ class TestGeminiClientCaching:
         mock_genai.GenerativeModel.return_value = mock_model
 
         client = GeminiClient(valid_config)
-        if hasattr(client, '_cache') and hasattr(client, '_get_cached'):
+        if hasattr(client, "_cache") and hasattr(client, "_get_cached"):
             client._cache = {}
             result = client._get_cached("nonexistent")
             assert result is None
@@ -1037,7 +1020,9 @@ class TestVerifyFindings:
 
     @patch("gemini_reviewer.gemini_client.genai")
     def test_keeps_subset(self, mock_genai, valid_config):
-        client = self._client_returning(mock_genai, valid_config, '{"keep": [1], "notes": "dropped 2 (false positive)"}')
+        client = self._client_returning(
+            mock_genai, valid_config, '{"keep": [1], "notes": "dropped 2 (false positive)"}'
+        )
         assert client.verify_findings("+ some diff", ["real bug", "false positive"]) == [1]
 
     @patch("gemini_reviewer.gemini_client.genai")
@@ -1075,7 +1060,9 @@ class TestRespondToReply:
 
     @patch("gemini_reviewer.gemini_client.genai")
     def test_parses_reply_and_resolved(self, mock_genai, valid_config):
-        client = self._client_returning(mock_genai, valid_config, '{"reply": "You are right, conceded.", "resolved": true}')
+        client = self._client_returning(
+            mock_genai, valid_config, '{"reply": "You are right, conceded.", "resolved": true}'
+        )
         result = client.respond_to_reply("orig", "code", "human: fixed it")
         assert result == {"reply": "You are right, conceded.", "resolved": True}
 

@@ -5,12 +5,11 @@ This module is responsible for building analysis context by detecting
 related files and gathering project context.
 """
 
+import ast
 import logging
 import os
 import re
-import ast
-from typing import List, Optional, Dict, Set, Any, Tuple
-from pathlib import Path
+from typing import Any
 
 from .models import DiffFile, PRDetails
 from .utils import get_file_language
@@ -34,26 +33,26 @@ class ContextBuilder:
         self.project_context_budget = project_context_budget
 
         # Session-level file content cache (keyed by "path@ref")
-        self._file_cache: Dict[str, Optional[str]] = {}
+        self._file_cache: dict[str, str | None] = {}
 
         # Single-scan repo data (populated lazily by _scan_repo_once)
         self._repo_scanned: bool = False
         self._repo_structure: str = ""
-        self._code_files: List[Tuple[str, str]] = []  # (rel_path, abs_path)
-        self._test_file_map: Dict[str, List[str]] = {}  # source base name -> test file rel paths
-        self._config_files: List[str] = []
+        self._code_files: list[tuple[str, str]] = []  # (rel_path, abs_path)
+        self._test_file_map: dict[str, list[str]] = {}  # source base name -> test file rel paths
+        self._config_files: list[str] = []
 
         # PR-stable context caches (reused across files in same review)
-        self._cached_mental_model: Optional[str] = None
-        self._cached_repo_structure: Optional[str] = None
-        self._cached_code_signatures: Optional[str] = None
-        self._cached_config_files: Optional[List[str]] = None
+        self._cached_mental_model: str | None = None
+        self._cached_repo_structure: str | None = None
+        self._cached_code_signatures: str | None = None
+        self._cached_config_files: list[str] | None = None
 
     # ------------------------------------------------------------------
     # File content cache
     # ------------------------------------------------------------------
 
-    def _get_file_content_cached(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
+    def _get_file_content_cached(self, owner: str, repo: str, path: str, ref: str) -> str | None:
         """Fetch file content via GitHub API with session-level caching."""
         cache_key = f"{path}@{ref}"
         if cache_key not in self._file_cache:
@@ -63,7 +62,7 @@ class ContextBuilder:
                 self._file_cache[cache_key] = None
         return self._file_cache[cache_key]
 
-    def get_cached_file_content(self, owner: str, repo: str, path: str, ref: str) -> Optional[str]:
+    def get_cached_file_content(self, owner: str, repo: str, path: str, ref: str) -> str | None:
         """Public accessor for cached file content (used by code_reviewer)."""
         return self._get_file_content_cached(owner, repo, path, ref)
 
@@ -91,45 +90,84 @@ class ContextBuilder:
 
         repo_root = os.getcwd()
         tree_lines = ["Repository Structure:"]
-        code_files: List[Tuple[str, str]] = []
-        test_file_map: Dict[str, List[str]] = {}
-        config_files: List[str] = []
+        code_files: list[tuple[str, str]] = []
+        test_file_map: dict[str, list[str]] = {}
+        config_files: list[str] = []
 
         # Directories to exclude
         exclude_dirs = {
-            '.git', '.github', '__pycache__', 'node_modules', '.venv', 'venv',
-            '.env', '.pytest_cache', '.mypy_cache', '.tox', 'build', 'dist',
-            '.eggs', '*.egg-info', '.idea', '.vscode'
+            ".git",
+            ".github",
+            "__pycache__",
+            "node_modules",
+            ".venv",
+            "venv",
+            ".env",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".tox",
+            "build",
+            "dist",
+            ".eggs",
+            "*.egg-info",
+            ".idea",
+            ".vscode",
         }
-        exclude_file_patterns = {'.pyc', '.pyo', '.pyd', '.so', '.dylib', '.dll', '.egg'}
-        code_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
-        test_dirs = {'test', 'tests', '__tests__', 'spec', 'specs'}
-        test_extensions = {'.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb'}
+        exclude_file_patterns = {".pyc", ".pyo", ".pyd", ".so", ".dylib", ".dll", ".egg"}
+        code_extensions = {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb"}
+        test_dirs = {"test", "tests", "__tests__", "spec", "specs"}
+        test_extensions = {".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb"}
 
         # Important config file names
         config_names = {
-            '.eslintrc', '.eslintrc.js', '.eslintrc.json', '.eslintrc.yml',
-            '.prettierrc', '.prettierrc.js', '.prettierrc.json',
-            '.pylintrc', 'pylint.cfg', '.flake8', 'tox.ini',
-            '.mypy.ini', 'mypy.ini', 'pyproject.toml',
-            'package.json', 'package-lock.json', 'yarn.lock',
-            'requirements.txt', 'Pipfile', 'Pipfile.lock', 'poetry.lock',
-            'go.mod', 'go.sum', 'Gemfile', 'Gemfile.lock',
-            'build.gradle', 'pom.xml', 'Makefile',
-            'Dockerfile', 'docker-compose.yml', 'docker-compose.yaml',
-            '.dockerignore',
-            '.travis.yml', 'circle.yml', '.gitlab-ci.yml',
-            'azure-pipelines.yml', 'Jenkinsfile',
-            'action.yml', 'action.yaml',
-            '.editorconfig', '.gitignore', '.gitattributes',
+            ".eslintrc",
+            ".eslintrc.js",
+            ".eslintrc.json",
+            ".eslintrc.yml",
+            ".prettierrc",
+            ".prettierrc.js",
+            ".prettierrc.json",
+            ".pylintrc",
+            "pylint.cfg",
+            ".flake8",
+            "tox.ini",
+            ".mypy.ini",
+            "mypy.ini",
+            "pyproject.toml",
+            "package.json",
+            "package-lock.json",
+            "yarn.lock",
+            "requirements.txt",
+            "Pipfile",
+            "Pipfile.lock",
+            "poetry.lock",
+            "go.mod",
+            "go.sum",
+            "Gemfile",
+            "Gemfile.lock",
+            "build.gradle",
+            "pom.xml",
+            "Makefile",
+            "Dockerfile",
+            "docker-compose.yml",
+            "docker-compose.yaml",
+            ".dockerignore",
+            ".travis.yml",
+            "circle.yml",
+            ".gitlab-ci.yml",
+            "azure-pipelines.yml",
+            "Jenkinsfile",
+            "action.yml",
+            "action.yaml",
+            ".editorconfig",
+            ".gitignore",
+            ".gitattributes",
         }
 
         def should_exclude_entry(name: str) -> bool:
             if name in exclude_dirs:
                 return True
-            if name.startswith('.') and name not in {'.gitignore', '.env.example'}:
-                return True
-            return False
+            return bool(name.startswith(".") and name not in {".gitignore", ".env.example"})
 
         def should_exclude_file(name: str) -> bool:
             return any(name.endswith(p) for p in exclude_file_patterns)
@@ -145,7 +183,13 @@ class ContextBuilder:
                     return
 
                 dirs = [e for e in entries if os.path.isdir(os.path.join(path, e)) and not should_exclude_entry(e)]
-                files = [e for e in entries if os.path.isfile(os.path.join(path, e)) and not should_exclude_entry(e) and not should_exclude_file(e)]
+                files = [
+                    e
+                    for e in entries
+                    if os.path.isfile(os.path.join(path, e))
+                    and not should_exclude_entry(e)
+                    and not should_exclude_file(e)
+                ]
 
                 for i, dirname in enumerate(dirs):
                     is_last_dir = (i == len(dirs) - 1) and not files
@@ -171,27 +215,27 @@ class ContextBuilder:
                     if file_ext in test_extensions:
                         in_test_dir = any(td in rel_path.split(os.sep) for td in test_dirs)
                         file_lower = filename.lower()
-                        if in_test_dir or file_lower.startswith('test') or file_lower.endswith('test' + file_ext):
+                        if in_test_dir or file_lower.startswith("test") or file_lower.endswith("test" + file_ext):
                             # Map base name (without test prefix/suffix) to this test file
                             base = file_lower
-                            for pref in ('test_', 'test'):
+                            for pref in ("test_", "test"):
                                 if base.startswith(pref):
-                                    base = base[len(pref):]
+                                    base = base[len(pref) :]
                                     break
-                            for suf in ('_test' + file_ext, 'test' + file_ext):
+                            for suf in ("_test" + file_ext, "test" + file_ext):
                                 if base.endswith(suf):
-                                    base = base[:-len(suf)]
+                                    base = base[: -len(suf)]
                                     break
                             # Also store the original name without extension as a key
-                            source_name = os.path.splitext(base)[0] if '.' in base else base
+                            source_name = os.path.splitext(base)[0] if "." in base else base
                             if source_name:
                                 test_file_map.setdefault(source_name, []).append(rel_path)
 
                     # Collect config files (only from root and .github)
                     depth_from_root = rel_path.count(os.sep)
-                    in_github = rel_path.startswith('.github' + os.sep)
+                    in_github = rel_path.startswith(".github" + os.sep)
                     if depth_from_root <= 1 or in_github:
-                        if filename in config_names or filename.startswith('Dockerfile') or filename.startswith('.env'):
+                        if filename in config_names or filename.startswith("Dockerfile") or filename.startswith(".env"):
                             config_files.append(rel_path)
 
             scan_dir(repo_root)
@@ -208,7 +252,7 @@ class ContextBuilder:
     # Related files detection
     # ------------------------------------------------------------------
 
-    async def detect_related_files(self, diff_file: DiffFile, pr_details: PRDetails) -> List[str]:
+    async def detect_related_files(self, diff_file: DiffFile, pr_details: PRDetails) -> list[str]:
         """Detect related files based on imports, dependencies, and inheritance.
 
         Analyzes the FULL file content (not just hunks) to find all dependencies.
@@ -227,7 +271,7 @@ class ContextBuilder:
         try:
             # Get the FULL file content, not just the diff hunks
             full_content = self._get_file_content_cached(
-                pr_details.owner, pr_details.repo, file_path, pr_details.head_sha or 'HEAD'
+                pr_details.owner, pr_details.repo, file_path, pr_details.head_sha or "HEAD"
             )
 
             # Fall back to reading from local filesystem if GitHub fetch fails
@@ -235,7 +279,7 @@ class ContextBuilder:
                 try:
                     local_path = os.path.join(os.getcwd(), file_path)
                     if os.path.exists(local_path):
-                        with open(local_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        with open(local_path, encoding="utf-8", errors="ignore") as f:
                             full_content = f.read()
                 except Exception:
                     pass
@@ -243,40 +287,40 @@ class ContextBuilder:
             # If still no content, fall back to hunk content
             if not full_content:
                 full_content = "\n".join(
-                    line[1:] if line and line[0] in '+ ' else line
+                    line[1:] if line and line[0] in "+ " else line
                     for hunk in diff_file.hunks
                     for line in hunk.lines
-                    if not line.startswith('-')
+                    if not line.startswith("-")
                 )
 
             # Import patterns for various languages
             import_patterns = {
-                'python': [
-                    r'from\s+([\w.]+)\s+import',
-                    r'import\s+([\w.]+)',
+                "python": [
+                    r"from\s+([\w.]+)\s+import",
+                    r"import\s+([\w.]+)",
                     # Dynamic imports
                     r'importlib\.import_module\(["\']([^"\']+)["\']\)',
                     r'__import__\(["\']([^"\']+)["\']\)',
                 ],
-                'javascript': [
+                "javascript": [
                     r'import\s+.*\s+from\s+["\']([^"\']+)["\']',
                     r'import\s+["\']([^"\']+)["\']',
                     r'require\(["\']([^"\']+)["\']\)',
                     r'import\(["\']([^"\']+)["\']\)',  # Dynamic imports
                 ],
-                'typescript': [
+                "typescript": [
                     r'import\s+.*\s+from\s+["\']([^"\']+)["\']',
                     r'import\s+["\']([^"\']+)["\']',
                     r'require\(["\']([^"\']+)["\']\)',
                     r'import\(["\']([^"\']+)["\']\)',
                 ],
-                'java': [r'import\s+([^;]+);'],
-                'go': [
+                "java": [r"import\s+([^;]+);"],
+                "go": [
                     r'import\s+["\']([^"\']+)["\']',
                     r'import\s+\w+\s+["\']([^"\']+)["\']',  # Named imports
                     r'import\s+\(\s*(?:[^)]*\s)?["\']([^"\']+)["\']',
                 ],
-                'ruby': [
+                "ruby": [
                     r'require\s+["\']([^"\']+)["\']',
                     r'require_relative\s+["\']([^"\']+)["\']',
                     r'load\s+["\']([^"\']+)["\']',
@@ -301,7 +345,7 @@ class ContextBuilder:
                             related_files.append(related_file)
 
             # For Python, also detect class inheritance and type annotations
-            if language and language.lower() == 'python':
+            if language and language.lower() == "python":
                 try:
                     tree = ast.parse(full_content)
                     for node in ast.walk(tree):
@@ -314,7 +358,7 @@ class ContextBuilder:
                                         module_name = base.value.id
                                         if module_name not in seen_imports:
                                             seen_imports.add(module_name)
-                                            rel = self._import_to_file_path(module_name, file_path, 'python')
+                                            rel = self._import_to_file_path(module_name, file_path, "python")
                                             if rel and rel not in related_files:
                                                 related_files.append(rel)
 
@@ -343,13 +387,25 @@ class ContextBuilder:
 
         return related_files
 
-    def _extract_type_refs(self, annotation, seen_imports: Set[str], related_files: List[str], current_file: str):
+    def _extract_type_refs(self, annotation, seen_imports: set[str], related_files: list[str], current_file: str):
         """Extract type references from annotations for dependency detection."""
         try:
             if isinstance(annotation, ast.Name):
                 # Simple type like 'MyClass'
                 type_name = annotation.id
-                if type_name not in seen_imports and type_name not in {'str', 'int', 'float', 'bool', 'None', 'Any', 'List', 'Dict', 'Optional', 'Tuple', 'Set'}:
+                if type_name not in seen_imports and type_name not in {
+                    "str",
+                    "int",
+                    "float",
+                    "bool",
+                    "None",
+                    "Any",
+                    "List",
+                    "Dict",
+                    "Optional",
+                    "Tuple",
+                    "Set",
+                }:
                     seen_imports.add(type_name)
             elif isinstance(annotation, ast.Attribute):
                 # Qualified type like 'module.MyClass'
@@ -357,7 +413,7 @@ class ContextBuilder:
                     module_name = annotation.value.id
                     if module_name not in seen_imports:
                         seen_imports.add(module_name)
-                        rel = self._import_to_file_path(module_name, current_file, 'python')
+                        rel = self._import_to_file_path(module_name, current_file, "python")
                         if rel and rel not in related_files:
                             related_files.append(rel)
             elif isinstance(annotation, ast.Subscript):
@@ -370,7 +426,7 @@ class ContextBuilder:
         except Exception:
             pass
 
-    def _import_to_file_path(self, import_path: str, current_file: str, language: str) -> Optional[str]:
+    def _import_to_file_path(self, import_path: str, current_file: str, language: str) -> str | None:
         """Convert an import path to a file path.
 
         Args:
@@ -383,27 +439,27 @@ class ContextBuilder:
         """
         try:
             # Handle relative imports
-            if import_path.startswith('.'):
+            if import_path.startswith("."):
                 current_dir = os.path.dirname(current_file)
                 # Count leading dots
-                dots = len(import_path) - len(import_path.lstrip('.'))
+                dots = len(import_path) - len(import_path.lstrip("."))
                 # Go up directories
                 for _ in range(dots - 1):
                     current_dir = os.path.dirname(current_dir)
-                import_path = import_path.lstrip('.')
-                base_path = os.path.join(current_dir, import_path.replace('.', '/'))
+                import_path = import_path.lstrip(".")
+                base_path = os.path.join(current_dir, import_path.replace(".", "/"))
             else:
                 # For absolute imports, try common patterns
-                base_path = import_path.replace('.', '/')
+                base_path = import_path.replace(".", "/")
 
             # Add appropriate extensions based on language
             extensions = {
-                'python': ['.py', '/__init__.py'],
-                'javascript': ['.js', '/index.js', '.jsx'],
-                'typescript': ['.ts', '/index.ts', '.tsx'],
-                'java': ['.java'],
-                'go': ['.go'],
-                'ruby': ['.rb']
+                "python": [".py", "/__init__.py"],
+                "javascript": [".js", "/index.js", ".jsx"],
+                "typescript": [".ts", "/index.ts", ".tsx"],
+                "java": [".java"],
+                "go": [".go"],
+                "ruby": [".rb"],
             }
 
             if language.lower() in extensions:
@@ -431,26 +487,26 @@ class ContextBuilder:
         self._cached_repo_structure = self._repo_structure
         return self._cached_repo_structure
 
-    def _find_reverse_dependencies(self, changed_file: str) -> List[str]:
+    def _find_reverse_dependencies(self, changed_file: str) -> list[str]:
         """Find files that import or depend on the changed file."""
         reverse_deps = []
         try:
             self._scan_repo_once()
 
-            changed_module = changed_file.replace('/', '.').replace('\\', '.')
-            for ext in ['.py', '.js', '.ts', '.jsx', '.tsx', '.go', '.java', '.rb']:
+            changed_module = changed_file.replace("/", ".").replace("\\", ".")
+            for ext in [".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb"]:
                 if changed_module.endswith(ext):
-                    changed_module = changed_module[:-len(ext)]
+                    changed_module = changed_module[: -len(ext)]
                     break
 
             changed_filename = os.path.basename(changed_file)
             changed_name = os.path.splitext(changed_filename)[0]
 
             import_patterns = [
-                rf'from\s+{re.escape(changed_module)}\s+import',
-                rf'import\s+{re.escape(changed_module)}',
-                rf'from\s+.*{re.escape(changed_name)}\s+import',
-                rf'import\s+.*{re.escape(changed_name)}',
+                rf"from\s+{re.escape(changed_module)}\s+import",
+                rf"import\s+{re.escape(changed_module)}",
+                rf"from\s+.*{re.escape(changed_name)}\s+import",
+                rf"import\s+.*{re.escape(changed_name)}",
                 rf'require\(["\'].*{re.escape(changed_filename)}["\']\)',
                 rf'import\s+.*from\s+["\'].*{re.escape(changed_filename)}["\']',
             ]
@@ -460,7 +516,7 @@ class ContextBuilder:
                     continue
 
                 try:
-                    with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(abs_path, encoding="utf-8", errors="ignore") as f:
                         content = f.read()
 
                     for pattern in import_patterns:
@@ -479,7 +535,7 @@ class ContextBuilder:
 
         return reverse_deps
 
-    def _find_function_callers(self, changed_file: str, diff_content: str) -> List[Dict[str, Any]]:
+    def _find_function_callers(self, changed_file: str, diff_content: str) -> list[dict[str, Any]]:
         """Find code that calls functions being modified in this diff."""
         callers = []
         try:
@@ -487,18 +543,18 @@ class ContextBuilder:
 
             # Extract function names being added/modified
             changed_functions = set()
-            for line in diff_content.split('\n'):
-                if line.startswith('+') and not line.startswith('+++'):
+            for line in diff_content.split("\n"):
+                if line.startswith("+") and not line.startswith("+++"):
                     clean_line = line[1:].strip()
-                    if clean_line.startswith('def ') or clean_line.startswith('async def '):
-                        func_name = clean_line.split('(')[0].replace('def ', '').replace('async ', '').strip()
+                    if clean_line.startswith("def ") or clean_line.startswith("async def "):
+                        func_name = clean_line.split("(")[0].replace("def ", "").replace("async ", "").strip()
                         if func_name:
                             changed_functions.add(func_name)
-                    match = re.search(r'function\s+(\w+)', clean_line)
+                    match = re.search(r"function\s+(\w+)", clean_line)
                     if match:
                         changed_functions.add(match.group(1))
-                    match = re.search(r'const\s+(\w+)\s*=', clean_line)
-                    if match and '=>' in clean_line:
+                    match = re.search(r"const\s+(\w+)\s*=", clean_line)
+                    if match and "=>" in clean_line:
                         changed_functions.add(match.group(1))
 
             if not changed_functions:
@@ -511,12 +567,12 @@ class ContextBuilder:
                     continue
 
                 try:
-                    with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(abs_path, encoding="utf-8", errors="ignore") as f:
                         content = f.read()
-                        lines = content.split('\n')
+                        lines = content.split("\n")
 
                     for func_name in changed_functions:
-                        call_pattern = rf'(?<!def\s)(?<!function\s)\b{re.escape(func_name)}\s*\('
+                        call_pattern = rf"(?<!def\s)(?<!function\s)\b{re.escape(func_name)}\s*\("
 
                         for i, line in enumerate(lines):
                             if re.search(call_pattern, line):
@@ -524,12 +580,14 @@ class ContextBuilder:
                                 end = min(len(lines), i + 4)
                                 context_lines = lines[start:end]
 
-                                callers.append({
-                                    'file': rel_path,
-                                    'function_name': func_name,
-                                    'line_number': i + 1,
-                                    'calling_code': '\n'.join(context_lines)
-                                })
+                                callers.append(
+                                    {
+                                        "file": rel_path,
+                                        "function_name": func_name,
+                                        "line_number": i + 1,
+                                        "calling_code": "\n".join(context_lines),
+                                    }
+                                )
 
                                 if len(callers) >= 15:
                                     break
@@ -551,13 +609,13 @@ class ContextBuilder:
 
         return callers
 
-    def _find_called_functions(self, file_content: str, file_path: str) -> List[Dict[str, Any]]:
+    def _find_called_functions(self, file_content: str, file_path: str) -> list[dict[str, Any]]:
         """Find definitions of functions that are called in the given file."""
         called_functions = []
         try:
             self._scan_repo_once()
 
-            if file_path.endswith('.py'):
+            if file_path.endswith(".py"):
                 try:
                     tree = ast.parse(file_content)
                     function_calls = set()
@@ -570,13 +628,13 @@ class ContextBuilder:
                                 function_calls.add(node.func.attr)
 
                     for rel_path, abs_path in self._code_files:
-                        if not rel_path.endswith('.py'):
+                        if not rel_path.endswith(".py"):
                             continue
                         if rel_path == file_path:
                             continue
 
                         try:
-                            with open(abs_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            with open(abs_path, encoding="utf-8", errors="ignore") as f:
                                 search_content = f.read()
 
                             search_tree = ast.parse(search_content)
@@ -584,16 +642,14 @@ class ContextBuilder:
                             for node in ast.walk(search_tree):
                                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                                     if node.name in function_calls:
-                                        lines = search_content.split('\n')
+                                        lines = search_content.split("\n")
                                         start_line = node.lineno - 1
                                         end_line = min(start_line + 15, len(lines))
-                                        func_code = '\n'.join(lines[start_line:end_line])
+                                        func_code = "\n".join(lines[start_line:end_line])
 
-                                        called_functions.append({
-                                            'file': rel_path,
-                                            'function_name': node.name,
-                                            'definition': func_code
-                                        })
+                                        called_functions.append(
+                                            {"file": rel_path, "function_name": node.name, "definition": func_code}
+                                        )
 
                                         if len(called_functions) >= 10:
                                             break
@@ -618,7 +674,7 @@ class ContextBuilder:
 
         return called_functions
 
-    def _find_test_files(self, changed_file: str) -> List[str]:
+    def _find_test_files(self, changed_file: str) -> list[str]:
         """Find test files related to the changed file."""
         self._scan_repo_once()
         changed_name = os.path.splitext(os.path.basename(changed_file))[0]
@@ -644,7 +700,7 @@ class ContextBuilder:
             logger.info(f"Found {len(test_files)} test files for {changed_file}")
         return test_files
 
-    def _find_config_files(self) -> List[str]:
+    def _find_config_files(self) -> list[str]:
         """Find configuration files (cached from single scan)."""
         if self._cached_config_files is not None:
             return self._cached_config_files
@@ -674,10 +730,10 @@ class ContextBuilder:
                 score += 0.3
 
             # Same package/module prefix = moderate relevance
-            changed_parts = changed_file.replace('\\', '/').split('/')
-            related_parts = related_file.replace('\\', '/').split('/')
+            changed_parts = changed_file.replace("\\", "/").split("/")
+            related_parts = related_file.replace("\\", "/").split("/")
             common_prefix = 0
-            for c, r in zip(changed_parts, related_parts):
+            for c, r in zip(changed_parts, related_parts, strict=False):
                 if c == r:
                     common_prefix += 1
                 else:
@@ -686,20 +742,20 @@ class ContextBuilder:
                 score += min(0.2, common_prefix * 0.05)
 
             # File is mentioned in the diff = very high relevance
-            related_name = os.path.basename(related_file).rsplit('.', 1)[0]
+            related_name = os.path.basename(related_file).rsplit(".", 1)[0]
             if related_name in diff_content:
                 score += 0.4
 
             # Related file is a utility/helper (lower priority)
-            if any(kw in related_file.lower() for kw in ['util', 'helper', 'common', 'base']):
+            if any(kw in related_file.lower() for kw in ["util", "helper", "common", "base"]):
                 score -= 0.1
 
             # Test files have lower priority for production code context
-            if any(kw in related_file.lower() for kw in ['test', 'spec', 'mock']):
+            if any(kw in related_file.lower() for kw in ["test", "spec", "mock"]):
                 score -= 0.15
 
             # Config files are useful
-            if any(kw in related_file.lower() for kw in ['config', 'settings', 'constants']):
+            if any(kw in related_file.lower() for kw in ["config", "settings", "constants"]):
                 score += 0.1
 
             # Same file extension = slightly more relevant
@@ -711,11 +767,7 @@ class ContextBuilder:
 
         return max(0.0, min(1.0, score))
 
-    def _prioritize_context_sections(
-        self,
-        sections: List[Dict[str, Any]],
-        max_size: int
-    ) -> List[str]:
+    def _prioritize_context_sections(self, sections: list[dict[str, Any]], max_size: int) -> list[str]:
         """Prioritize and select context sections to fit within budget.
 
         Args:
@@ -726,13 +778,13 @@ class ContextBuilder:
             List of selected content strings in priority order
         """
         # Sort by priority (higher first)
-        sorted_sections = sorted(sections, key=lambda x: x.get('priority', 0), reverse=True)
+        sorted_sections = sorted(sections, key=lambda x: x.get("priority", 0), reverse=True)
 
         selected = []
         current_size = 0
 
         for section in sorted_sections:
-            content = section.get('content', '')
+            content = section.get("content", "")
             if not content:
                 continue
 
@@ -744,10 +796,10 @@ class ContextBuilder:
                 current_size += content_size
             else:
                 # Try to include a truncated version if it's high priority
-                if section.get('priority', 0) >= 0.8:
+                if section.get("priority", 0) >= 0.8:
                     remaining = max_size - current_size
                     if remaining > 500:  # Only include if we have meaningful space
-                        truncated = content[:remaining - 50] + "\n... (truncated due to space)"
+                        truncated = content[: remaining - 50] + "\n... (truncated due to space)"
                         selected.append(truncated)
                         current_size += len(truncated)
                         break  # No more space after this
@@ -769,17 +821,24 @@ class ContextBuilder:
             repo_root = os.getcwd()
 
             # 1. Documentation summaries (README, CONTRIBUTING, etc.)
-            doc_files = ['README.md', 'README.rst', 'CONTRIBUTING.md', 'ARCHITECTURE.md',
-                        'ADR.md', 'DESIGN.md', 'docs/README.md']
+            doc_files = [
+                "README.md",
+                "README.rst",
+                "CONTRIBUTING.md",
+                "ARCHITECTURE.md",
+                "ADR.md",
+                "DESIGN.md",
+                "docs/README.md",
+            ]
 
             for doc_file in doc_files:
                 doc_path = os.path.join(repo_root, doc_file)
                 if os.path.exists(doc_path):
                     try:
-                        with open(doc_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        with open(doc_path, encoding="utf-8", errors="ignore") as f:
                             content = f.read()
 
-                        lines = content.split('\n')
+                        lines = content.split("\n")
                         summary_lines = []
                         char_count = 0
 
@@ -789,7 +848,7 @@ class ContextBuilder:
                             if char_count > 1000:
                                 break
 
-                        summary = '\n'.join(summary_lines)
+                        summary = "\n".join(summary_lines)
                         if len(content) > char_count:
                             summary += "\n... (truncated)"
 
@@ -799,12 +858,26 @@ class ContextBuilder:
 
             # 2. Entrypoints identification
             entrypoint_files = [
-                'main.py', 'app.py', '__main__.py', 'run.py', 'server.py',
-                'index.js', 'index.ts', 'main.js', 'main.ts', 'app.js', 'app.ts',
-                'main.go', 'cmd/main.go',
-                'setup.py', 'setup.cfg', 'pyproject.toml',
-                'action.yml', 'action.yaml',
-                'Dockerfile', 'docker-compose.yml',
+                "main.py",
+                "app.py",
+                "__main__.py",
+                "run.py",
+                "server.py",
+                "index.js",
+                "index.ts",
+                "main.js",
+                "main.ts",
+                "app.js",
+                "app.ts",
+                "main.go",
+                "cmd/main.go",
+                "setup.py",
+                "setup.cfg",
+                "pyproject.toml",
+                "action.yml",
+                "action.yaml",
+                "Dockerfile",
+                "docker-compose.yml",
             ]
 
             found_entrypoints = []
@@ -814,27 +887,28 @@ class ContextBuilder:
                     found_entrypoints.append(entry)
 
             if found_entrypoints:
-                model_parts.append(f"## Entrypoints:\n" + "\n".join(f"- {e}" for e in found_entrypoints) + "\n")
+                model_parts.append("## Entrypoints:\n" + "\n".join(f"- {e}" for e in found_entrypoints) + "\n")
 
             # 3. Package/dependency management and scripts
             pkg_files = {
-                'package.json': ['scripts', 'dependencies', 'devDependencies'],
-                'pyproject.toml': ['tool.poetry.scripts', 'project.scripts'],
-                'requirements.txt': None,
-                'Pipfile': ['scripts'],
-                'go.mod': ['module', 'require'],
-                'Gemfile': None,
+                "package.json": ["scripts", "dependencies", "devDependencies"],
+                "pyproject.toml": ["tool.poetry.scripts", "project.scripts"],
+                "requirements.txt": None,
+                "Pipfile": ["scripts"],
+                "go.mod": ["module", "require"],
+                "Gemfile": None,
             }
 
             for pkg_file, keys_to_extract in pkg_files.items():
                 pkg_path = os.path.join(repo_root, pkg_file)
                 if os.path.exists(pkg_path):
                     try:
-                        with open(pkg_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        with open(pkg_path, encoding="utf-8", errors="ignore") as f:
                             content = f.read()
 
-                        if pkg_file.endswith('.json'):
+                        if pkg_file.endswith(".json"):
                             import json
+
                             try:
                                 data = json.loads(content)
                                 scripts_info = []
@@ -849,16 +923,16 @@ class ContextBuilder:
                             except json.JSONDecodeError:
                                 pass
                         else:
-                            lines = content.split('\n')[:20]
+                            lines = content.split("\n")[:20]
                             model_parts.append(f"## {pkg_file} (first 20 lines):\n" + "\n".join(lines) + "\n")
                     except Exception:
                         pass
 
             # 4. CI/CD workflows
             ci_dirs = [
-                os.path.join(repo_root, '.github', 'workflows'),
-                os.path.join(repo_root, '.gitlab'),
-                os.path.join(repo_root, '.circleci'),
+                os.path.join(repo_root, ".github", "workflows"),
+                os.path.join(repo_root, ".gitlab"),
+                os.path.join(repo_root, ".circleci"),
             ]
 
             workflow_files = []
@@ -866,39 +940,49 @@ class ContextBuilder:
                 if os.path.exists(ci_dir):
                     try:
                         for item in os.listdir(ci_dir):
-                            if item.endswith(('.yml', '.yaml')):
+                            if item.endswith((".yml", ".yaml")):
                                 workflow_files.append(os.path.relpath(os.path.join(ci_dir, item), repo_root))
                     except Exception:
                         pass
 
             if workflow_files:
-                model_parts.append(f"## CI/CD Workflows:\n" + "\n".join(f"- {w}" for w in workflow_files) + "\n")
+                model_parts.append("## CI/CD Workflows:\n" + "\n".join(f"- {w}" for w in workflow_files) + "\n")
 
             # 5. Environment samples and lockfiles
             env_files = []
-            for item in ['.env.example', '.env.sample', '.env.template',
-                        'package-lock.json', 'yarn.lock', 'poetry.lock',
-                        'Pipfile.lock', 'go.sum', 'Gemfile.lock']:
+            for item in [
+                ".env.example",
+                ".env.sample",
+                ".env.template",
+                "package-lock.json",
+                "yarn.lock",
+                "poetry.lock",
+                "Pipfile.lock",
+                "go.sum",
+                "Gemfile.lock",
+            ]:
                 item_path = os.path.join(repo_root, item)
                 if os.path.exists(item_path):
                     env_files.append(item)
 
             if env_files:
-                model_parts.append(f"## Environment & Lockfiles:\n" + "\n".join(f"- {e}" for e in env_files) + "\n")
+                model_parts.append("## Environment & Lockfiles:\n" + "\n".join(f"- {e}" for e in env_files) + "\n")
 
             # 6. Service boundaries / Architecture (detect major directories)
             major_dirs = []
             try:
                 for item in os.listdir(repo_root):
                     item_path = os.path.join(repo_root, item)
-                    if os.path.isdir(item_path) and not item.startswith('.'):
-                        if item not in {'node_modules', '__pycache__', 'venv', '.venv', 'build', 'dist'}:
+                    if os.path.isdir(item_path) and not item.startswith("."):
+                        if item not in {"node_modules", "__pycache__", "venv", ".venv", "build", "dist"}:
                             major_dirs.append(item)
             except Exception:
                 pass
 
             if major_dirs:
-                model_parts.append(f"## Major Packages/Modules:\n" + "\n".join(f"- {d}/" for d in major_dirs[:15]) + "\n")
+                model_parts.append(
+                    "## Major Packages/Modules:\n" + "\n".join(f"- {d}/" for d in major_dirs[:15]) + "\n"
+                )
 
         except Exception as e:
             logger.debug(f"Error building repo mental model: {str(e)}")
@@ -919,11 +1003,11 @@ class ContextBuilder:
             signatures = ["Code Structure (Functions & Classes):"]
             files_processed = 0
 
-            def extract_python_signatures(file_path: str, rel_path: str) -> List[str]:
+            def extract_python_signatures(file_path: str, rel_path: str) -> list[str]:
                 """Extract signatures from Python files with full type annotations."""
                 sigs = []
                 try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(file_path, encoding="utf-8", errors="ignore") as f:
                         content = f.read()
 
                     tree = ast.parse(content)
@@ -997,20 +1081,20 @@ class ContextBuilder:
 
                 return sigs
 
-            def extract_generic_signatures(file_path: str, rel_path: str) -> List[str]:
+            def extract_generic_signatures(file_path: str, rel_path: str) -> list[str]:
                 """Extract signatures from other code files using regex."""
                 sigs = []
                 try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    with open(file_path, encoding="utf-8", errors="ignore") as f:
                         content = f.read()
 
                     patterns = [
-                        r'function\s+(\w+)\s*\(',
-                        r'const\s+(\w+)\s*=\s*\([^)]*\)\s*=>',
-                        r'export\s+function\s+(\w+)\s*\(',
-                        r'class\s+(\w+)',
-                        r'func\s+(\w+)\s*\(',
-                        r'(?:public|private|protected)\s+(?:static\s+)?(?:\w+)\s+(\w+)\s*\(',
+                        r"function\s+(\w+)\s*\(",
+                        r"const\s+(\w+)\s*=\s*\([^)]*\)\s*=>",
+                        r"export\s+function\s+(\w+)\s*\(",
+                        r"class\s+(\w+)",
+                        r"func\s+(\w+)\s*\(",
+                        r"(?:public|private|protected)\s+(?:static\s+)?(?:\w+)\s+(\w+)\s*\(",
                     ]
 
                     found_names = set()
@@ -1033,7 +1117,7 @@ class ContextBuilder:
 
                 file_ext = os.path.splitext(rel_path)[1]
                 file_sigs = []
-                if file_ext == '.py':
+                if file_ext == ".py":
                     file_sigs = extract_python_signatures(abs_path, rel_path)
                 else:
                     file_sigs = extract_generic_signatures(abs_path, rel_path)
@@ -1057,11 +1141,8 @@ class ContextBuilder:
     # ------------------------------------------------------------------
 
     async def build_project_context(
-        self,
-        diff_file: DiffFile,
-        related_files: List[str],
-        pr_details: PRDetails
-    ) -> Optional[str]:
+        self, diff_file: DiffFile, related_files: list[str], pr_details: PRDetails
+    ) -> str | None:
         """Build project context including repo mental model, dependency-adjacent code,
         full repository structure, code signatures, previous comments, and related file contents.
 
@@ -1079,29 +1160,25 @@ class ContextBuilder:
             logger.info("Building comprehensive repository context for code review")
 
             # Pre-compute diff_content once (used by multiple steps)
-            diff_content = "\n".join(
-                line for hunk in diff_file.hunks for line in hunk.lines
-            )
+            diff_content = "\n".join(line for hunk in diff_file.hunks for line in hunk.lines)
 
             # Collect all context sections with priorities for budget-aware assembly
-            sections: List[Dict[str, Any]] = []
+            sections: list[dict[str, Any]] = []
 
             # SECTION: Previous review comments (highest priority for follow-ups)
             try:
-                prev = self.github_client.get_file_review_comments(
-                    pr_details,
-                    diff_file.file_info.path,
-                    limit=30
-                )
+                prev = self.github_client.get_file_review_comments(pr_details, diff_file.file_info.path, limit=30)
                 if prev:
                     snippet = prev
                     if len(snippet) > 4000:
                         snippet = snippet[:4000] + "\n... (truncated)"
-                    sections.append({
-                        'content': f"### Previous review history for {diff_file.file_info.path}\n{snippet}\n",
-                        'priority': 1.0,
-                        'name': 'previous_comments'
-                    })
+                    sections.append(
+                        {
+                            "content": f"### Previous review history for {diff_file.file_info.path}\n{snippet}\n",
+                            "priority": 1.0,
+                            "name": "previous_comments",
+                        }
+                    )
             except Exception:
                 pass
 
@@ -1109,9 +1186,7 @@ class ContextBuilder:
             if related_files:
                 scored_files = []
                 for related_file in related_files:
-                    score = self._score_related_file_relevance(
-                        related_file, diff_file.file_info.path, diff_content
-                    )
+                    score = self._score_related_file_relevance(related_file, diff_file.file_info.path, diff_content)
                     scored_files.append((related_file, score))
                 scored_files.sort(key=lambda x: x[1], reverse=True)
                 logger.debug(f"Prioritized related files: {[(f, f'{s:.2f}') for f, s in scored_files[:5]]}")
@@ -1119,10 +1194,7 @@ class ContextBuilder:
                 related_parts = []
                 for related_file, score in scored_files:
                     content = self._get_file_content_cached(
-                        pr_details.owner,
-                        pr_details.repo,
-                        related_file,
-                        pr_details.base_sha or 'main'
+                        pr_details.owner, pr_details.repo, related_file, pr_details.base_sha or "main"
                     )
                     if content:
                         if score >= 0.5:
@@ -1139,11 +1211,7 @@ class ContextBuilder:
                         )
 
                 if related_parts:
-                    sections.append({
-                        'content': "\n".join(related_parts),
-                        'priority': 0.9,
-                        'name': 'related_files'
-                    })
+                    sections.append({"content": "\n".join(related_parts), "priority": 0.9, "name": "related_files"})
 
             # SECTION: Function callers
             try:
@@ -1154,14 +1222,12 @@ class ContextBuilder:
                     caller_parts.append("Changes to function signatures or behavior may affect these callers:\n")
 
                     for caller in callers[:10]:
-                        caller_parts.append(f"\n#### {caller['file']} calls `{caller['function_name']}` (line {caller['line_number']}):")
+                        caller_parts.append(
+                            f"\n#### {caller['file']} calls `{caller['function_name']}` (line {caller['line_number']}):"
+                        )
                         caller_parts.append(f"```\n{caller['calling_code']}\n```")
 
-                    sections.append({
-                        'content': "\n".join(caller_parts),
-                        'priority': 0.85,
-                        'name': 'function_callers'
-                    })
+                    sections.append({"content": "\n".join(caller_parts), "priority": 0.85, "name": "function_callers"})
                     logger.info(f"Found {len(callers)} function caller contexts")
             except Exception as e:
                 logger.debug(f"Error finding function callers: {e}")
@@ -1169,9 +1235,7 @@ class ContextBuilder:
             # SECTION: Called function definitions
             try:
                 file_content = self._get_file_content_cached(
-                    pr_details.owner, pr_details.repo,
-                    diff_file.file_info.path,
-                    pr_details.head_sha or 'HEAD'
+                    pr_details.owner, pr_details.repo, diff_file.file_info.path, pr_details.head_sha or "HEAD"
                 )
                 if file_content:
                     called_funcs = self._find_called_functions(file_content, diff_file.file_info.path)
@@ -1183,11 +1247,9 @@ class ContextBuilder:
                             called_parts.append(f"\n#### `{func['function_name']}` from {func['file']}:")
                             called_parts.append(f"```\n{func['definition']}\n```")
 
-                        sections.append({
-                            'content': "\n".join(called_parts),
-                            'priority': 0.8,
-                            'name': 'called_functions'
-                        })
+                        sections.append(
+                            {"content": "\n".join(called_parts), "priority": 0.8, "name": "called_functions"}
+                        )
                         logger.info(f"Found {len(called_funcs)} called function definitions")
             except Exception as e:
                 logger.debug(f"Error finding called functions: {e}")
@@ -1195,63 +1257,63 @@ class ContextBuilder:
             # SECTION: Code signatures (PR-stable, cached)
             code_signatures = self._extract_code_signatures()
             if code_signatures:
-                sections.append({
-                    'content': f"### {code_signatures}\n",
-                    'priority': 0.6,
-                    'name': 'code_signatures'
-                })
+                sections.append({"content": f"### {code_signatures}\n", "priority": 0.6, "name": "code_signatures"})
 
             # SECTION: Repo mental model (PR-stable, cached)
             repo_mental_model = self._build_repo_mental_model()
             if repo_mental_model:
-                sections.append({
-                    'content': repo_mental_model,
-                    'priority': 0.5,
-                    'name': 'repo_mental_model'
-                })
+                sections.append({"content": repo_mental_model, "priority": 0.5, "name": "repo_mental_model"})
 
             # SECTION: Dependency-adjacent listing
             dep_adjacent_parts = []
             reverse_deps = self._find_reverse_dependencies(diff_file.file_info.path)
             if reverse_deps:
-                dep_adjacent_parts.append(f"#### Reverse Dependencies (files that import {diff_file.file_info.path}):\n" +
-                                         "\n".join(f"- {rd}" for rd in reverse_deps))
+                dep_adjacent_parts.append(
+                    f"#### Reverse Dependencies (files that import {diff_file.file_info.path}):\n"
+                    + "\n".join(f"- {rd}" for rd in reverse_deps)
+                )
                 logger.info(f"Found {len(reverse_deps)} reverse dependencies")
 
             test_files = self._find_test_files(diff_file.file_info.path)
             if test_files:
-                dep_adjacent_parts.append(f"#### Related Test Files:\n" +
-                                         "\n".join(f"- {tf}" for tf in test_files))
+                dep_adjacent_parts.append("#### Related Test Files:\n" + "\n".join(f"- {tf}" for tf in test_files))
                 logger.info(f"Found {len(test_files)} test files")
 
             config_files = self._find_config_files()
             if config_files:
-                dep_adjacent_parts.append(f"#### Configuration Files:\n" +
-                                         "\n".join(f"- {cf}" for cf in config_files[:15]))
+                dep_adjacent_parts.append(
+                    "#### Configuration Files:\n" + "\n".join(f"- {cf}" for cf in config_files[:15])
+                )
                 logger.info(f"Found {len(config_files)} config files")
 
             if dep_adjacent_parts:
-                sections.append({
-                    'content': "### Dependency-Adjacent Code\n\n" + "\n\n".join(dep_adjacent_parts) + "\n",
-                    'priority': 0.4,
-                    'name': 'dependency_adjacent'
-                })
+                sections.append(
+                    {
+                        "content": "### Dependency-Adjacent Code\n\n" + "\n\n".join(dep_adjacent_parts) + "\n",
+                        "priority": 0.4,
+                        "name": "dependency_adjacent",
+                    }
+                )
 
             # SECTION: Repo structure tree (PR-stable, cached)
             repo_structure = self._scan_repository_structure()
             if repo_structure:
-                sections.append({
-                    'content': f"### Full Repository Structure\n{repo_structure}\n",
-                    'priority': 0.3,
-                    'name': 'repo_structure'
-                })
+                sections.append(
+                    {
+                        "content": f"### Full Repository Structure\n{repo_structure}\n",
+                        "priority": 0.3,
+                        "name": "repo_structure",
+                    }
+                )
 
             # Assemble with budget-aware prioritization
             if sections:
                 selected = self._prioritize_context_sections(sections, max_context_size)
                 if selected:
                     total_size = sum(len(s) for s in selected)
-                    logger.info(f"Built project context: {len(selected)} sections, ~{total_size} chars (budget: {max_context_size})")
+                    logger.info(
+                        f"Built project context: {len(selected)} sections, ~{total_size} chars (budget: {max_context_size})"
+                    )
                     return "\n".join(selected)
 
         except Exception as e:

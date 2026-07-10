@@ -5,26 +5,30 @@ This module handles all configuration aspects including environment variables,
 validation, and default settings.
 """
 
-import logging
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Optional
 from enum import Enum
+from typing import Any
 
+from .env_reader import get_env_bool, get_env_enum, get_env_float, get_env_int, get_env_list, get_env_str
 from .models import ReviewFocus, ReviewPriority
+from .prompts import ReviewMode
+from .prompts import get_review_prompt_template as get_prompt_template
+from .utils import is_doc_file, is_test_file, matches_pattern
 from .validators import (
-    validate_required_string, validate_positive_int, validate_range,
-    validate_github_token_format, validate_gemini_api_key_format,
-    ensure_positive_or_default
+    ensure_positive_or_default,
+    validate_gemini_api_key_format,
+    validate_github_token_format,
+    validate_positive_int,
+    validate_range,
+    validate_required_string,
 )
-from .env_reader import get_env_str, get_env_int, get_env_float, get_env_bool, get_env_list, get_env_enum
-from .utils import matches_pattern, is_test_file, is_doc_file
-from .prompts import ReviewMode, get_review_prompt_template as get_prompt_template
 
 
 class LogLevel(Enum):
     """Available log levels."""
+
     DEBUG = "DEBUG"
-    INFO = "INFO" 
+    INFO = "INFO"
     WARNING = "WARNING"
     ERROR = "ERROR"
 
@@ -32,13 +36,14 @@ class LogLevel(Enum):
 @dataclass
 class GitHubConfig:
     """Configuration for GitHub integration."""
+
     token: str
     api_base_url: str = "https://api.github.com"
     timeout: int = 30
     max_retries: int = 3
     retry_delay_min: int = 4
     retry_delay_max: int = 10
-    
+
     def __post_init__(self):
         """Validate GitHub configuration."""
         validate_required_string(self.token, "GitHub token")
@@ -46,9 +51,10 @@ class GitHubConfig:
             raise ValueError("Invalid GitHub token format")
 
 
-@dataclass  
+@dataclass
 class GeminiConfig:
     """Configuration for Gemini AI integration."""
+
     api_key: str
     model_name: str = "gemini-3-flash-preview"
     max_output_tokens: int = 8192
@@ -59,7 +65,7 @@ class GeminiConfig:
     retry_delay_min: int = 4
     retry_delay_max: int = 60
     max_prompt_length: int = 100000
-    
+
     def __post_init__(self):
         """Validate Gemini configuration."""
         validate_required_string(self.api_key, "Gemini API key")
@@ -72,10 +78,11 @@ class GeminiConfig:
 @dataclass
 class ReviewConfig:
     """Configuration for code review behavior."""
+
     review_mode: ReviewMode = ReviewMode.STANDARD
-    focus_areas: List[ReviewFocus] = field(default_factory=lambda: [ReviewFocus.ALL])
-    exclude_patterns: List[str] = field(default_factory=list)
-    include_patterns: List[str] = field(default_factory=list)
+    focus_areas: list[ReviewFocus] = field(default_factory=lambda: [ReviewFocus.ALL])
+    exclude_patterns: list[str] = field(default_factory=list)
+    include_patterns: list[str] = field(default_factory=list)
     # High safety ceilings, not routine drop-limits: a real reviewer never
     # silently skips changed code on a large PR. Chunking (per-hunk calls)
     # handles volume; these only guard against pathological/generated diffs,
@@ -88,7 +95,7 @@ class ReviewConfig:
     review_docs: bool = False
     # Second-pass adversarial verification of candidate findings (drops false positives).
     enable_verify_pass: bool = True
-    custom_prompt_template: Optional[str] = None
+    custom_prompt_template: str | None = None
     priority_threshold: ReviewPriority = ReviewPriority.LOW
     # Comment caps (optional). 0 disables limits (default behavior).
     max_comments_total: int = 0
@@ -98,30 +105,37 @@ class ReviewConfig:
     position_window: int = 2
     complexity_line_threshold: int = 2000
     project_context_budget: int = 60000
-    
+
     def __post_init__(self):
         """Validate review configuration."""
         validate_positive_int(self.max_files_per_review, "max_files_per_review")
         validate_positive_int(self.max_lines_per_hunk, "max_lines_per_hunk")
-        
+
         # Set default exclude patterns if none specified
         if not self.exclude_patterns:
             self.exclude_patterns = [
-                "*.md", "*.txt", "*.yml", "*.yaml", "*.json",
-                "package-lock.json", "yarn.lock", "*.log"
+                "*.md",
+                "*.txt",
+                "*.yml",
+                "*.yaml",
+                "*.json",
+                "package-lock.json",
+                "yarn.lock",
+                "*.log",
             ]
 
 
 @dataclass
 class PerformanceConfig:
     """Configuration for performance optimization."""
+
     enable_concurrent_processing: bool = True
     max_concurrent_files: int = 3
     max_concurrent_api_calls: int = 5
     chunk_size: int = 10
     enable_caching: bool = True
     cache_ttl: int = 3600  # seconds
-    
+
     def __post_init__(self):
         """Validate performance configuration."""
         self.max_concurrent_files = ensure_positive_or_default(self.max_concurrent_files, 1)
@@ -131,6 +145,7 @@ class PerformanceConfig:
 @dataclass
 class LoggingConfig:
     """Configuration for logging."""
+
     level: LogLevel = LogLevel.INFO
     format: str = "%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
     enable_file_logging: bool = False
@@ -142,50 +157,54 @@ class LoggingConfig:
 @dataclass
 class Config:
     """Main configuration class that combines all configuration sections."""
+
     github: GitHubConfig
     gemini: GeminiConfig
     review: ReviewConfig = field(default_factory=ReviewConfig)
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
-    
+
     @classmethod
-    def from_environment(cls) -> 'Config':
+    def from_environment(cls) -> "Config":
         """Create configuration from environment variables."""
         # Required environment variables
         github_token = get_env_str("GITHUB_TOKEN")
         gemini_api_key = get_env_str("GEMINI_API_KEY")
-        
+
         if not github_token:
             raise ValueError("GITHUB_TOKEN environment variable is required")
         if not gemini_api_key:
             raise ValueError("GEMINI_API_KEY environment variable is required")
-        
+
         # GitHub configuration
         github_config = GitHubConfig(
             token=github_token,
             timeout=get_env_int("GITHUB_TIMEOUT", 30),
-            max_retries=get_env_int("GITHUB_MAX_RETRIES", 3)
+            max_retries=get_env_int("GITHUB_MAX_RETRIES", 3),
         )
-        
-        # Gemini configuration  
+
+        # Gemini configuration
         gemini_config = GeminiConfig(
             api_key=gemini_api_key,
             model_name=get_env_str("GEMINI_MODEL", "gemini-3-flash-preview"),
             temperature=get_env_float("GEMINI_TEMPERATURE", 0.0),
             top_p=get_env_float("GEMINI_TOP_P", 0.9),
-            max_output_tokens=get_env_int("GEMINI_MAX_TOKENS", 8192)
+            max_output_tokens=get_env_int("GEMINI_MAX_TOKENS", 8192),
         )
-        
+
         # Review configuration
         exclude_patterns = get_env_list("EXCLUDE", ",", "INPUT_EXCLUDE")
         include_patterns = get_env_list("INCLUDE", ",", "INPUT_INCLUDE")
         review_mode = get_env_enum("REVIEW_MODE", ReviewMode, ReviewMode.STANDARD)
         priority_threshold = get_env_enum(
-            "REVIEW_PRIORITY_THRESHOLD", ReviewPriority, ReviewPriority.LOW,
-            "INPUT_REVIEW_PRIORITY_THRESHOLD", "PRIORITY_THRESHOLD"
+            "REVIEW_PRIORITY_THRESHOLD",
+            ReviewPriority,
+            ReviewPriority.LOW,
+            "INPUT_REVIEW_PRIORITY_THRESHOLD",
+            "PRIORITY_THRESHOLD",
         )
         custom_prompt = get_env_str("SYSTEM_PROMPT", "", "INPUT_SYSTEM_PROMPT")
-        
+
         review_config = ReviewConfig(
             review_mode=review_mode,
             exclude_patterns=exclude_patterns,
@@ -203,68 +222,56 @@ class Config:
             max_context_chars=get_env_int("MAX_CONTEXT_CHARS", 12000),
             position_window=get_env_int("POSITION_WINDOW", 2),
             complexity_line_threshold=get_env_int("COMPLEXITY_LINE_THRESHOLD", 2000),
-            project_context_budget=get_env_int("PROJECT_CONTEXT_BUDGET", 60000)
+            project_context_budget=get_env_int("PROJECT_CONTEXT_BUDGET", 60000),
         )
-        
+
         # Performance configuration
         performance_config = PerformanceConfig(
             enable_concurrent_processing=get_env_bool("ENABLE_CONCURRENT", True),
             max_concurrent_files=get_env_int("MAX_CONCURRENT_FILES", 3),
             max_concurrent_api_calls=get_env_int("MAX_CONCURRENT_API_CALLS", 5),
-            enable_caching=get_env_bool("ENABLE_CACHING", True)
+            enable_caching=get_env_bool("ENABLE_CACHING", True),
         )
-        
+
         # Logging configuration
         log_level = get_env_enum("LOG_LEVEL", LogLevel, LogLevel.INFO)
-        logging_config = LoggingConfig(
-            level=log_level,
-            enable_file_logging=get_env_bool("ENABLE_FILE_LOGGING", False)
-        )
-        
+        logging_config = LoggingConfig(level=log_level, enable_file_logging=get_env_bool("ENABLE_FILE_LOGGING", False))
+
         return cls(
             github=github_config,
             gemini=gemini_config,
             review=review_config,
             performance=performance_config,
-            logging=logging_config
+            logging=logging_config,
         )
-    
+
     def get_review_prompt_template(self, previous_comments: str = "") -> str:
         """Get the prompt template based on review mode and custom instructions.
-        
+
         Args:
             previous_comments: Previous review comments for follow-up reviews
         """
-        return get_prompt_template(
-            self.review.review_mode,
-            self.review.custom_prompt_template or "",
-            previous_comments
-        )
-    
+        return get_prompt_template(self.review.review_mode, self.review.custom_prompt_template or "", previous_comments)
+
     def should_review_file(self, file_path: str) -> bool:
         """Determine if a file should be reviewed based on configuration."""
         # Check include patterns first
         if self.review.include_patterns:
-            if not any(matches_pattern(file_path, pattern) 
-                      for pattern in self.review.include_patterns):
+            if not any(matches_pattern(file_path, pattern) for pattern in self.review.include_patterns):
                 return False
-        
+
         # Check exclude patterns
-        if any(matches_pattern(file_path, pattern) 
-               for pattern in self.review.exclude_patterns):
+        if any(matches_pattern(file_path, pattern) for pattern in self.review.exclude_patterns):
             return False
-        
+
         # Check test files
         if not self.review.review_test_files and is_test_file(file_path):
             return False
-        
+
         # Check documentation files
-        if not self.review.review_docs and is_doc_file(file_path):
-            return False
-        
-        return True
-    
-    def to_dict(self) -> Dict[str, Any]:
+        return not (not self.review.review_docs and is_doc_file(file_path))
+
+    def to_dict(self) -> dict[str, Any]:
         """Convert configuration to dictionary."""
         return {
             "github": {
@@ -294,5 +301,5 @@ class Config:
             "logging": {
                 "level": self.logging.level.value,
                 "enable_file_logging": self.logging.enable_file_logging,
-            }
+            },
         }

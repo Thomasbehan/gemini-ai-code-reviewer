@@ -5,12 +5,12 @@ Comprehensive tests for gemini_reviewer/validators.py
 import pytest
 
 from gemini_reviewer.validators import (
-    validate_required_string,
+    ensure_positive_or_default,
+    validate_gemini_api_key_format,
+    validate_github_token_format,
     validate_positive_int,
     validate_range,
-    validate_github_token_format,
-    validate_gemini_api_key_format,
-    ensure_positive_or_default,
+    validate_required_string,
 )
 
 
