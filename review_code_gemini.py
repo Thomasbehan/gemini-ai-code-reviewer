@@ -11,60 +11,57 @@ import logging
 import logging.handlers
 import os
 import sys
-from typing import Optional
 
-from gemini_reviewer import Config, CodeReviewer, CodeReviewerError, ReviewResult
+from gemini_reviewer import CodeReviewer, Config, ReviewResult
 
 
 def setup_logging_from_config(config: Config):
     """Set up logging based on configuration."""
     log_handlers = [logging.StreamHandler(sys.stdout)]
-    
+
     # Add file handler if enabled
     if config.logging.enable_file_logging:
         try:
             file_handler = logging.handlers.RotatingFileHandler(
                 config.logging.log_file_path,
                 maxBytes=config.logging.max_log_size,
-                backupCount=config.logging.backup_count
+                backupCount=config.logging.backup_count,
             )
             log_handlers.append(file_handler)
         except Exception as e:
             print(f"Warning: Could not setup file logging: {e}")
-    
+
     logging.basicConfig(
-        level=getattr(logging, config.logging.level.value),
-        format=config.logging.format,
-        handlers=log_handlers
+        level=getattr(logging, config.logging.level.value), format=config.logging.format, handlers=log_handlers
     )
-    
+
     # Set specific log levels for external libraries
-    logging.getLogger('github').setLevel(logging.WARNING)
-    logging.getLogger('requests').setLevel(logging.WARNING)
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('google').setLevel(logging.WARNING)
+    logging.getLogger("github").setLevel(logging.WARNING)
+    logging.getLogger("requests").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("google").setLevel(logging.WARNING)
 
 
 def validate_environment() -> bool:
     """Validate that all required environment variables are present."""
     required_vars = ["GITHUB_TOKEN", "GEMINI_API_KEY", "GITHUB_EVENT_PATH"]
     missing_vars = []
-    
+
     for var in required_vars:
         if not os.environ.get(var):
             missing_vars.append(var)
-    
+
     if missing_vars:
         print(f"Error: Missing required environment variables: {', '.join(missing_vars)}")
         return False
-    
-    # Validate event name - support both pull_request and issue_comment
+
+    # Validate event name - support pull_request, issue_comment, and review-comment replies
     event_name = os.environ.get("GITHUB_EVENT_NAME", "")
-    supported_events = ["pull_request", "issue_comment"]
+    supported_events = ["pull_request", "issue_comment", "pull_request_review_comment"]
     if event_name not in supported_events:
         print(f"Error: Unsupported GitHub event: {event_name}. Supported events: {', '.join(supported_events)}")
         return False
-    
+
     return True
 
 
@@ -75,7 +72,7 @@ def check_if_valid_trigger() -> bool:
     try:
         event_name = os.environ.get("GITHUB_EVENT_NAME", "")
 
-        with open(os.environ["GITHUB_EVENT_PATH"], "r") as f:
+        with open(os.environ["GITHUB_EVENT_PATH"]) as f:
             event_data = json.load(f)
 
         # Handle pull_request events
@@ -86,7 +83,9 @@ def check_if_valid_trigger() -> bool:
                 print(f"Info: Pull request {action}, triggering code review.")
                 return True
             else:
-                print(f"Info: Pull request action '{action}' does not trigger review. Only 'opened', 'synchronize', and 'reopened' trigger reviews.")
+                print(
+                    f"Info: Pull request action '{action}' does not trigger review. Only 'opened', 'synchronize', and 'reopened' trigger reviews."
+                )
                 return False
 
         # Handle issue_comment events (/gemini-review or /review commands)
@@ -114,6 +113,30 @@ def check_if_valid_trigger() -> bool:
                 print("Info: Review command detected, triggering fresh full review.")
             return True
 
+        # Handle pull_request_review_comment events (human replies on a review thread)
+        elif event_name == "pull_request_review_comment":
+            import re
+
+            if event_data.get("action", "") != "created":
+                print("Info: Review comment not 'created', skipping.")
+                return False
+
+            comment = event_data.get("comment", {})
+            # Only replies within a thread (not top-level review comments).
+            if not comment.get("in_reply_to_id"):
+                print("Info: Review comment is not a reply to an existing thread, skipping.")
+                return False
+
+            # Ignore the bot's own replies (loop guard on the signed reply marker).
+            body = comment.get("body", "") or ""
+            if re.search(r"<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->", body, flags=re.IGNORECASE):
+                print("Info: Reply authored by the reviewer itself, skipping (loop guard).")
+                return False
+
+            os.environ["REPLY_EVENT"] = "true"
+            print("Info: Human reply on a review thread detected, generating response.")
+            return True
+
         return False
 
     except Exception as e:
@@ -124,46 +147,51 @@ def check_if_valid_trigger() -> bool:
 async def main_async() -> int:
     """Main async function for the code review process."""
     print("🤖 Gemini AI Code Reviewer Starting...")
-    
+
     # Validate environment first
     if not validate_environment():
         return 1
-    
+
     # Check if this is a valid trigger
     if not check_if_valid_trigger():
         return 0  # Not an error, just not our trigger
-    
+
     try:
         # Load configuration from environment
         config = Config.from_environment()
-        
+
         # Setup logging based on configuration
         setup_logging_from_config(config)
         logger = logging.getLogger(__name__)
-        
+
         logger.info("=== Gemini AI Code Reviewer Started ===")
         logger.info(f"Configuration loaded: {config.to_dict()}")
-        
+
         # Create code reviewer with configuration
         with CodeReviewer(config) as reviewer:
-            
             # Test connections to external services
             logger.info("Testing connections to external services...")
             connections = reviewer.test_connections()
-            
+
             failed_connections = [service for service, status in connections.items() if not status]
             if failed_connections:
                 logger.error(f"Failed connections: {failed_connections}")
                 return 1
-            
+
             logger.info("✅ All external service connections are working")
-            
+
+            # Human reply on a review thread → respond in-thread, skip full review.
+            if os.environ.get("REPLY_EVENT") == "true":
+                posted = reviewer.handle_review_comment_reply(os.environ["GITHUB_EVENT_PATH"])
+                logger.info("✅ Reply handled" if posted else "ℹ️ No reply posted")
+                return 0
+
             # Perform the code review
             result = await reviewer.review_pull_request(os.environ["GITHUB_EVENT_PATH"])
-            
+
             # Log results
             await _log_review_results(result, reviewer)
-            
+
             # Return appropriate exit code
             if result.errors:
                 logger.error(f"Review completed with {len(result.errors)} errors")
@@ -173,7 +201,7 @@ async def main_async() -> int:
             else:
                 logger.info("✅ Review completed successfully")
                 return 0
-    
+
     except Exception as e:
         print(f"❌ Fatal error during code review: {str(e)}")
         logging.exception("Fatal error details:")
@@ -183,7 +211,7 @@ async def main_async() -> int:
 async def _log_review_results(result: ReviewResult, reviewer: CodeReviewer):
     """Log comprehensive review results."""
     logger = logging.getLogger(__name__)
-    
+
     # Basic results
     logger.info("=== Review Results ===")
     logger.info(f"PR: #{result.pr_details.pull_number} - {result.pr_details.title}")
@@ -191,7 +219,7 @@ async def _log_review_results(result: ReviewResult, reviewer: CodeReviewer):
     logger.info(f"Comments generated: {result.total_comments}")
     processing_time = result.processing_time or 0.0
     logger.info(f"Processing time: {processing_time:.2f}s")
-    
+
     # Comment breakdown by priority
     if result.comments:
         priority_counts = result.comments_by_priority
@@ -200,7 +228,7 @@ async def _log_review_results(result: ReviewResult, reviewer: CodeReviewer):
             if count > 0:
                 emoji = {"critical": "🚨", "high": "⚠️", "medium": "💡", "low": "ℹ️"}.get(priority.value, "📝")
                 logger.info(f"  {emoji} {priority.value.title()}: {count}")
-    
+
     # Detailed statistics
     stats = reviewer.get_statistics()
     logger.debug("=== Detailed Statistics ===")
@@ -208,7 +236,7 @@ async def _log_review_results(result: ReviewResult, reviewer: CodeReviewer):
     logger.debug(f"GitHub stats: {stats.get('github', {})}")
     logger.debug(f"Gemini stats: {stats.get('gemini', {})}")
     logger.debug(f"Parsing stats: {stats.get('parsing', {})}")
-    
+
     # Errors
     if result.errors:
         logger.warning(f"Errors encountered: {len(result.errors)}")

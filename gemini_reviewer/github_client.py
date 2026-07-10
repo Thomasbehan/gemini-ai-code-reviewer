@@ -5,86 +5,96 @@ This module handles all GitHub API interactions including fetching PR details,
 diffs, and creating review comments with proper retry logic and error handling.
 """
 
+import difflib
+import hashlib
 import json
 import logging
-import requests
-import hashlib
-import re
 import os
-from typing import List, Dict, Any, Optional, Set
-import difflib
+import re
+from typing import Any
+
+import requests
 from github import Github
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, RetryError
+from tenacity import RetryError, retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .config import GitHubConfig
-from .models import PRDetails, ReviewComment, ReviewResult
-
+from .models import PRDetails, ReviewComment
 
 logger = logging.getLogger(__name__)
 
 
 class GitHubClientError(Exception):
     """Base exception for GitHub client errors."""
+
     pass
 
 
 class PRNotFoundError(GitHubClientError):
     """Exception raised when PR is not found."""
+
     pass
 
 
 class RateLimitError(GitHubClientError):
     """Exception raised when GitHub API rate limit is exceeded."""
+
     pass
 
 
 class DiffTooLargeError(GitHubClientError):
     """Exception raised when the diff is too large for the .diff endpoint (406)."""
+
     pass
 
 
 class GitHubClient:
     """GitHub API client with retry logic and comprehensive error handling."""
-    
+
     def __init__(self, config: GitHubConfig):
         """Initialize GitHub client with configuration."""
         self.config = config
         self._client = Github(config.token)
         self._session = requests.Session()
-        self._session.headers.update({
-            'Authorization': f'Bearer {config.token}',
-            'User-Agent': 'Gemini-AI-Code-Reviewer/1.0',
-            'Accept': 'application/vnd.github.v3+json'
-        })
-        
+        self._session.headers.update(
+            {
+                "Authorization": f"Bearer {config.token}",
+                "User-Agent": "Gemini-AI-Code-Reviewer/1.0",
+                "Accept": "application/vnd.github.v3+json",
+            }
+        )
+
         logger.info("Initialized GitHub client")
-    
+
     def get_pr_details_from_event(self, event_path: str) -> PRDetails:
         """Extract PR details from GitHub Actions event payload."""
         try:
-            with open(event_path, "r") as f:
+            with open(event_path) as f:
                 event_data = json.load(f)
             logger.info("Successfully loaded GitHub event data")
         except (FileNotFoundError, json.JSONDecodeError) as e:
             logger.error(f"Failed to load GitHub event data: {str(e)}")
             raise GitHubClientError(f"Failed to load event data: {str(e)}")
-        
+
         # Handle comment trigger differently from direct PR events
         if "issue" in event_data and "pull_request" in event_data["issue"]:
             # For comment triggers, we need to get the PR number from the issue
             pull_number = event_data["issue"]["number"]
             repo_full_name = event_data["repository"]["full_name"]
+        elif isinstance(event_data.get("pull_request"), dict) and "number" in event_data["pull_request"]:
+            # Review-comment events carry the PR as a nested object, not a top-level number.
+            pull_number = event_data["pull_request"]["number"]
+            repo_full_name = event_data["repository"]["full_name"]
         else:
             # Original logic for direct PR events
             pull_number = event_data["number"]
             repo_full_name = event_data["repository"]["full_name"]
-        
+
         if not repo_full_name or "/" not in repo_full_name:
             raise GitHubClientError(f"Invalid repository name: {repo_full_name}")
-        
+
         owner, repo = repo_full_name.split("/", 1)
         logger.info(f"Processing PR #{pull_number} in repository {repo_full_name}")
-        
+
         try:
             pr_details = self.get_pr_details(owner, repo, pull_number)
             logger.info(f"Successfully retrieved PR details: {pr_details.title}")
@@ -92,24 +102,24 @@ class GitHubClient:
         except Exception as e:
             logger.error(f"Failed to get PR details: {str(e)}")
             raise GitHubClientError(f"Failed to get PR details: {str(e)}")
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((requests.exceptions.RequestException, Exception))
+        retry=retry_if_exception_type((requests.exceptions.RequestException, Exception)),
     )
     def get_pr_details(self, owner: str, repo: str, pull_number: int) -> PRDetails:
         """Get pull request details with retry logic."""
         logger.debug(f"Fetching PR details for {owner}/{repo}#{pull_number}")
-        
+
         try:
             repo_obj = self._get_repo_with_retry(f"{owner}/{repo}")
             pr = self._get_pr_with_retry(repo_obj, pull_number)
-            
+
             # Sanitize PR title and description
             title = self._sanitize_input(pr.title or "")
             description = self._sanitize_input(pr.body or "")
-            
+
             pr_details = PRDetails(
                 owner=owner,
                 repo=repo,
@@ -117,20 +127,20 @@ class GitHubClient:
                 title=title,
                 description=description,
                 head_sha=pr.head.sha,
-                base_sha=pr.base.sha
+                base_sha=pr.base.sha,
             )
-            
+
             logger.debug(f"Retrieved PR details: {title}")
             return pr_details
-            
+
         except Exception as e:
             logger.warning(f"Failed to get PR details: {str(e)}")
             raise
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((requests.exceptions.RequestException, Exception))
+        retry=retry_if_exception_type((requests.exceptions.RequestException, Exception)),
     )
     def _get_repo_with_retry(self, repo_name: str):
         """Get repository with retry logic."""
@@ -140,11 +150,11 @@ class GitHubClient:
         except Exception as e:
             logger.warning(f"Failed to get repository {repo_name}: {str(e)}")
             raise
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((requests.exceptions.RequestException, Exception))
+        retry=retry_if_exception_type((requests.exceptions.RequestException, Exception)),
     )
     def _get_pr_with_retry(self, repo, pull_number: int):
         """Get pull request with retry logic."""
@@ -156,16 +166,16 @@ class GitHubClient:
                 raise PRNotFoundError(f"PR #{pull_number} not found")
             logger.warning(f"Failed to get PR #{pull_number}: {str(e)}")
             raise
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=10),
-        retry=retry_if_exception_type((requests.exceptions.RequestException, requests.exceptions.Timeout))
+        retry=retry_if_exception_type((requests.exceptions.RequestException, requests.exceptions.Timeout)),
     )
     def _fetch_diff_via_api(self, repo_name: str, pull_number: int) -> str:
         """Fetch diff via the .diff endpoint. Raises on non-200 responses."""
         api_url = f"{self.config.api_base_url}/repos/{repo_name}/pulls/{pull_number}.diff"
-        diff_headers = {'Accept': 'application/vnd.github.v3.diff'}
+        diff_headers = {"Accept": "application/vnd.github.v3.diff"}
 
         logger.debug(f"Making diff API request to: {api_url}")
         response = self._session.get(api_url, headers=diff_headers, timeout=self.config.timeout)
@@ -180,9 +190,7 @@ class GitHubClient:
             else:
                 raise GitHubClientError("Access forbidden - check GitHub token permissions")
         elif response.status_code == 406:
-            raise DiffTooLargeError(
-                f"Diff too large for .diff endpoint (406 Not Acceptable)"
-            )
+            raise DiffTooLargeError("Diff too large for .diff endpoint (406 Not Acceptable)")
         else:
             logger.error(f"Failed to get diff. Status code: {response.status_code}")
             response.raise_for_status()
@@ -194,24 +202,24 @@ class GitHubClient:
         repo_obj = self._get_repo_with_retry(repo_name)
         pr = self._get_pr_with_retry(repo_obj, pull_number)
 
-        parts: List[str] = []
+        parts: list[str] = []
         for f in pr.get_files():
-            patch = getattr(f, 'patch', None)
-            status = getattr(f, 'status', '') or ''
-            filename = getattr(f, 'filename', '') or ''
-            prev = getattr(f, 'previous_filename', None)
+            patch = getattr(f, "patch", None)
+            status = getattr(f, "status", "") or ""
+            filename = getattr(f, "filename", "") or ""
+            prev = getattr(f, "previous_filename", None)
             # Skip binary files (patch is None)
             if not patch or not filename:
                 continue
-            if status == 'added':
+            if status == "added":
                 diff_header = f"diff --git a/{filename} b/{filename}\n"
                 from_header = "--- /dev/null\n"
                 to_header = f"+++ b/{filename}\n"
-            elif status == 'removed':
+            elif status == "removed":
                 diff_header = f"diff --git a/{filename} b/{filename}\n"
                 from_header = f"--- a/{filename}\n"
                 to_header = "+++ /dev/null\n"
-            elif status == 'renamed' and prev:
+            elif status == "renamed" and prev:
                 diff_header = f"diff --git a/{prev} b/{filename}\n"
                 from_header = f"--- a/{prev}\n"
                 to_header = f"+++ b/{filename}\n"
@@ -286,25 +294,25 @@ class GitHubClient:
         except Exception as e:
             logger.error(f"Unexpected error while fetching diff: {str(e)}")
             raise GitHubClientError(f"Failed to fetch diff: {str(e)}")
-        
-    def get_last_reviewed_commit_sha(self, pr_details: PRDetails) -> Optional[str]:
+
+    def get_last_reviewed_commit_sha(self, pr_details: PRDetails) -> str | None:
         """Simplified detection of the last commit reviewed by this bot.
-        
+
         Strategy:
         1. Find the LATEST review or comment containing "Gemini AI Code Review" marker
         2. Only consider authors with "github-action" in their username
         3. Get all commits on the PR
         4. Return the first commit SHA that came AFTER the review/comment timestamp
-        
+
         This ensures we only review NEW commits since the last bot review,
         preventing endless cycles and never re-reviewing the entire codebase.
-        
+
         Returns: SHA of the last reviewed commit, or None if no prior review found.
         """
         try:
             repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
             pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
-            
+
             # Get all commits on the PR (we'll need this for timestamp mapping)
             try:
                 all_commits = list(pr.get_commits())
@@ -314,33 +322,33 @@ class GitHubClient:
             except Exception as e:
                 logger.warning(f"Could not retrieve commit list: {e}")
                 return None
-            
+
             if not all_commits:
                 logger.info("No commits found on PR")
                 return None
-            
+
             # Find the latest review/comment with our marker from a github-action author
             # Support both "Gemini AI Code Reviewer" and legacy "Gemini AI Code Review"
             marker_regex = re.compile(r"Gemini AI Code Review(?:er)?", re.IGNORECASE)
             latest_review_time = None
             latest_review_source = None
-            
+
             # Check PR reviews (these have bodies with our marker)
             try:
                 for review in pr.get_reviews():
                     try:
-                        author_login = getattr(review.user, 'login', '') or ''
-                        body = getattr(review, 'body', '') or ''
-                        submitted_at = getattr(review, 'submitted_at', None)
-                        
+                        author_login = getattr(review.user, "login", "") or ""
+                        body = getattr(review, "body", "") or ""
+                        submitted_at = getattr(review, "submitted_at", None)
+
                         # Only consider github-action authors with our marker
-                        if 'github-action' not in author_login.lower():
+                        if "github-action" not in author_login.lower():
                             continue
                         if not marker_regex.search(body):
                             continue
                         if not submitted_at:
                             continue
-                        
+
                         # Track the latest review
                         if latest_review_time is None or submitted_at > latest_review_time:
                             latest_review_time = submitted_at
@@ -350,23 +358,23 @@ class GitHubClient:
                         continue
             except Exception as e:
                 logger.debug(f"Error scanning PR reviews: {e}")
-            
+
             # Check issue comments (may also contain our marker)
             try:
                 for comment in pr.as_issue().get_comments():
                     try:
-                        author_login = getattr(getattr(comment, 'user', None), 'login', '') or ''
-                        body = getattr(comment, 'body', '') or ''
-                        created_at = getattr(comment, 'created_at', None)
-                        
+                        author_login = getattr(getattr(comment, "user", None), "login", "") or ""
+                        body = getattr(comment, "body", "") or ""
+                        created_at = getattr(comment, "created_at", None)
+
                         # Only consider github-action authors with our marker
-                        if 'github-action' not in author_login.lower():
+                        if "github-action" not in author_login.lower():
                             continue
                         if not marker_regex.search(body):
                             continue
                         if not created_at:
                             continue
-                        
+
                         # Track the latest comment
                         if latest_review_time is None or created_at > latest_review_time:
                             latest_review_time = created_at
@@ -376,33 +384,33 @@ class GitHubClient:
                         continue
             except Exception as e:
                 logger.debug(f"Error scanning issue comments: {e}")
-            
+
             # If no prior review found, this is the first review
             if latest_review_time is None:
                 logger.info("No prior bot review found - this is the first review")
                 return None
-            
+
             logger.info(f"Latest bot review: {latest_review_source} at {latest_review_time}")
-            
+
             # Find the last commit at or before the review time
             # This is the commit that was reviewed
             last_reviewed_sha = None
             for commit in all_commits:
                 try:
-                    sha = getattr(commit, 'sha', None)
-                    commit_obj = getattr(commit, 'commit', None)
+                    sha = getattr(commit, "sha", None)
+                    commit_obj = getattr(commit, "commit", None)
                     # Use committer date (when it was added to the branch)
-                    committer = getattr(commit_obj, 'committer', None) if commit_obj else None
-                    commit_time = getattr(committer, 'date', None) if committer else None
-                    
+                    committer = getattr(commit_obj, "committer", None) if commit_obj else None
+                    commit_time = getattr(committer, "date", None) if committer else None
+
                     # Fallback to author date if committer date not available
                     if not commit_time:
-                        author = getattr(commit_obj, 'author', None) if commit_obj else None
-                        commit_time = getattr(author, 'date', None) if author else None
-                    
+                        author = getattr(commit_obj, "author", None) if commit_obj else None
+                        commit_time = getattr(author, "date", None) if author else None
+
                     if not sha or not commit_time:
                         continue
-                    
+
                     # If this commit was made at or before the review time, it was reviewed
                     if commit_time <= latest_review_time:
                         last_reviewed_sha = sha
@@ -413,28 +421,28 @@ class GitHubClient:
                         break
                 except Exception:
                     continue
-            
+
             if last_reviewed_sha:
                 logger.info(f"Last reviewed commit: {last_reviewed_sha[:7]}")
                 return last_reviewed_sha
             else:
                 logger.warning("Could not map review timestamp to any commit")
                 return None
-                
+
         except Exception as e:
             logger.warning(f"Error determining last reviewed commit: {e}")
             return None
-        
-    def get_pr_diff_since(self, pr_details: PRDetails, base_sha: str) -> Optional[str]:
+
+    def get_pr_diff_since(self, pr_details: PRDetails, base_sha: str) -> str | None:
         """Fetch a diff of changes since a given base SHA up to the PR head.
         Primary strategy: GitHub compare API.
         Fallback: build incremental diff by iterating PR commits after base_sha.
-        
+
         Returns:
         - Diff text string if there are new changes
         - Empty string "" if no new changes (prevents re-reviewing entire codebase)
         - None only if base_sha is not provided (first review, should fetch full PR diff)
-        
+
         This ensures we NEVER re-review the entire codebase unnecessarily and
         we also don't miss changes when the compare API fails (e.g., synthetic
         merge SHAs or history quirks).
@@ -442,18 +450,18 @@ class GitHubClient:
         try:
             if not base_sha:
                 return None
-            
+
             # Re-fetch the PR to get the most current head SHA
             try:
                 repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
                 pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
                 current_head_sha = pr.head.sha
-                
+
                 # Also verify against the latest commit from the list
                 try:
                     all_commits = list(pr.get_commits())
                     if all_commits:
-                        actual_latest_sha = getattr(all_commits[-1], 'sha', None)
+                        actual_latest_sha = getattr(all_commits[-1], "sha", None)
                         if actual_latest_sha and actual_latest_sha != current_head_sha:
                             logger.warning(
                                 f"PR head.sha ({current_head_sha[:7]}) differs from latest commit in list ({actual_latest_sha[:7]})"
@@ -467,33 +475,31 @@ class GitHubClient:
                 if not current_head_sha:
                     logger.warning("Could not determine current head SHA; treating as no new changes")
                     return ""
-            
+
             # Ignore GITHUB_SHA because it can be a synthetic merge
-            github_sha = os.getenv('GITHUB_SHA')
+            github_sha = os.getenv("GITHUB_SHA")
             if github_sha and github_sha != current_head_sha:
-                logger.info(
-                    "GITHUB_SHA differs from PR head (likely a synthetic merge); ignoring for incremental diff"
-                )
-            
+                logger.info("GITHUB_SHA differs from PR head (likely a synthetic merge); ignoring for incremental diff")
+
             repo_name = pr_details.repo_full_name
-            
+
             logger.info(f"Comparing: base_sha={base_sha[:7]}... vs current_head_sha={current_head_sha[:7]}...")
             if pr_details.head_sha and pr_details.head_sha != current_head_sha:
                 logger.info(
                     f"Note: pr_details.head_sha ({pr_details.head_sha[:7]}) differs from current head ({current_head_sha[:7]})"
                 )
-            
+
             # If base equals head, nothing to review
             if base_sha == current_head_sha:
                 logger.info("Base SHA equals current head; no new changes to review.")
                 return ""
-            
+
             # Try compare API first
             api_url = f"{self.config.api_base_url}/repos/{repo_name}/compare/{base_sha}...{current_head_sha}.diff"
-            diff_headers = {'Accept': 'application/vnd.github.v3.diff'}
+            diff_headers = {"Accept": "application/vnd.github.v3.diff"}
             logger.info(f"Fetching incremental diff: {base_sha[:7]}... to {current_head_sha[:7]}...")
             resp = self._session.get(api_url, headers=diff_headers, timeout=self.config.timeout)
-            
+
             if resp.status_code == 200:
                 text = resp.text or ""
                 if text.strip() == "":
@@ -501,10 +507,8 @@ class GitHubClient:
                 else:
                     return text
             else:
-                logger.warning(
-                    f"Compare API failed with {resp.status_code}; attempting per-commit fallback."
-                )
-            
+                logger.warning(f"Compare API failed with {resp.status_code}; attempting per-commit fallback.")
+
             # Fallback: build incremental diff by iterating commits after base_sha
             fallback = self.get_incremental_diff_by_commits(pr_details, base_sha)
             return fallback if fallback is not None else ""
@@ -514,7 +518,7 @@ class GitHubClient:
             )
             return ""
 
-    def get_incremental_diff_by_commits(self, pr_details: PRDetails, base_sha: str) -> Optional[str]:
+    def get_incremental_diff_by_commits(self, pr_details: PRDetails, base_sha: str) -> str | None:
         """Fallback incremental diff: concatenate patches for commits after base_sha.
         Steps:
         1. Find commits on the PR after base_sha.
@@ -532,55 +536,57 @@ class GitHubClient:
             if not commits:
                 logger.info("No commits found on PR while building fallback incremental diff")
                 return ""
-            
+
             # Identify position of base_sha in the PR commits
             base_index = None
             for idx, c in enumerate(commits):
                 try:
-                    if getattr(c, 'sha', None) == base_sha:
+                    if getattr(c, "sha", None) == base_sha:
                         base_index = idx
                         break
                 except Exception:
                     continue
-            
+
             # If base_sha not found, we still try to use commit timestamps from last review
             if base_index is None:
-                logger.warning("Base SHA not found in PR commit list; will include all commits as a conservative fallback")
+                logger.warning(
+                    "Base SHA not found in PR commit list; will include all commits as a conservative fallback"
+                )
                 start_idx = 0
             else:
                 start_idx = base_index + 1
-            
+
             commits_after = commits[start_idx:]
             logger.info(f"Found {len(commits_after)} commit(s) after base_sha for fallback diff")
             if len(commits_after) == 0:
                 return ""
-            
-            parts: List[str] = []
+
+            parts: list[str] = []
             for c in commits_after:
-                sha = getattr(c, 'sha', None)
+                sha = getattr(c, "sha", None)
                 if not sha:
                     continue
                 try:
                     gh_commit = repo_obj.get_commit(sha)
                     # Each file has attributes: filename, status, patch, previous_filename (for renamed)
-                    for f in getattr(gh_commit, 'files', []) or []:
-                        patch = getattr(f, 'patch', None)
-                        status = getattr(f, 'status', '') or ''
-                        filename = getattr(f, 'filename', '') or ''
-                        prev = getattr(f, 'previous_filename', None)
+                    for f in getattr(gh_commit, "files", []) or []:
+                        patch = getattr(f, "patch", None)
+                        status = getattr(f, "status", "") or ""
+                        filename = getattr(f, "filename", "") or ""
+                        prev = getattr(f, "previous_filename", None)
                         # Skip binary files (patch is None)
                         if not patch or not filename:
                             continue
                         # Build unified diff headers
-                        if status == 'added':
+                        if status == "added":
                             diff_header = f"diff --git a/{filename} b/{filename}\n"
-                            from_header = f"--- /dev/null\n"
+                            from_header = "--- /dev/null\n"
                             to_header = f"+++ b/{filename}\n"
-                        elif status == 'removed':
+                        elif status == "removed":
                             diff_header = f"diff --git a/{filename} b/{filename}\n"
                             from_header = f"--- a/{filename}\n"
-                            to_header = f"+++ /dev/null\n"
-                        elif status == 'renamed' and prev:
+                            to_header = "+++ /dev/null\n"
+                        elif status == "renamed" and prev:
                             diff_header = f"diff --git a/{prev} b/{filename}\n"
                             from_header = f"--- a/{prev}\n"
                             to_header = f"+++ b/{filename}\n"
@@ -592,7 +598,7 @@ class GitHubClient:
                 except Exception as e:
                     logger.debug(f"Failed to fetch commit {sha[:7]} for fallback diff: {e}")
                     continue
-            
+
             combined = "".join(parts)
             if not combined.strip():
                 logger.info("Fallback per-commit diff produced no content (possibly only binary changes)")
@@ -603,46 +609,51 @@ class GitHubClient:
             logger.warning(f"Error while building fallback incremental diff: {e}")
             return ""
 
-    
     @retry(
         stop=stop_after_attempt(2),
         wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_exception_type((requests.exceptions.RequestException, Exception))
+        retry=retry_if_exception_type((requests.exceptions.RequestException, Exception)),
     )
-    def create_review(self, pr_details: PRDetails, comments: List[ReviewComment], event: str = "COMMENT", total_comments_generated: int = None) -> bool:
+    def create_review(
+        self,
+        pr_details: PRDetails,
+        comments: list[ReviewComment],
+        event: str = "COMMENT",
+        total_comments_generated: int = None,
+    ) -> bool:
         """Create a review on GitHub with retry logic.
-        
+
         Args:
             pr_details: Pull request details
             comments: List of review comments to post (after filtering)
             event: Review event type - "APPROVE", "REQUEST_CHANGES", or "COMMENT"
             total_comments_generated: Total number of comments generated before filtering
-        
+
         Returns:
             True if review was created successfully
         """
         logger.info(f"Creating review with {len(comments)} comments for PR #{pr_details.pull_number} (event: {event})")
-        
+
         try:
             repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
             pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
-            
+
             # Validate and convert comments
             github_comments = []
             for comment in comments:
                 if not isinstance(comment, ReviewComment):
                     logger.warning(f"Invalid comment type: {type(comment)}")
                     continue
-                
+
                 github_comment = self._validate_and_sanitize_comment(comment)
                 if github_comment:
                     github_comments.append(github_comment)
-            
+
             logger.info(f"Creating review with {len(github_comments)} valid comments")
-            
+
             # Use total_comments_generated if provided, otherwise use comments list length
             total_generated = total_comments_generated if total_comments_generated is not None else len(comments)
-            
+
             # Generate review body based on whether there are comments and if any were filtered
             if github_comments:
                 review_body = self._generate_review_summary(comments)
@@ -652,22 +663,15 @@ class GitHubClient:
                     review_body = self._generate_filtered_message(total_generated)
                 else:
                     review_body = self._generate_approval_message()
-            
+
             # Create the review
             # Note: When there are no comments, we don't pass the comments parameter at all
             # as passing None or empty list with certain events can cause API errors
             try:
                 if github_comments:
-                    review = pr.create_review(
-                        body=review_body,
-                        comments=github_comments,
-                        event=event
-                    )
+                    review = pr.create_review(body=review_body, comments=github_comments, event=event)
                 else:
-                    review = pr.create_review(
-                        body=review_body,
-                        event=event
-                    )
+                    review = pr.create_review(body=review_body, event=event)
                 logger.info(f"✅ Review created successfully with ID: {review.id}")
                 return True
             except Exception as e:
@@ -676,28 +680,21 @@ class GitHubClient:
                     logger.warning(f"APPROVE review failed ({e}); falling back to COMMENT event.")
                     try:
                         if github_comments:
-                            review = pr.create_review(
-                                body=review_body,
-                                comments=github_comments,
-                                event="COMMENT"
-                            )
+                            review = pr.create_review(body=review_body, comments=github_comments, event="COMMENT")
                         else:
-                            review = pr.create_review(
-                                body=review_body,
-                                event="COMMENT"
-                            )
+                            review = pr.create_review(body=review_body, event="COMMENT")
                         logger.info(f"✅ Fallback COMMENT review created successfully with ID: {review.id}")
                         return True
                     except Exception as e2:
                         logger.error(f"Fallback to COMMENT also failed: {e2}")
                         raise
                 raise
-            
+
         except Exception as e:
             logger.error(f"Failed to create review: {str(e)}")
             raise GitHubClientError(f"Failed to create review: {str(e)}")
-    
-    def _validate_and_sanitize_comment(self, comment: ReviewComment) -> Optional[Dict[str, Any]]:
+
+    def _validate_and_sanitize_comment(self, comment: ReviewComment) -> dict[str, Any] | None:
         """Validate and sanitize a review comment.
         Appends a hidden signature marker to the body for future deduplication.
         """
@@ -706,33 +703,33 @@ class GitHubClient:
             if not all([comment.body, comment.path]):
                 logger.warning(f"Comment missing required fields: {comment}")
                 return None
-            
+
             # Validate position
             if not isinstance(comment.position, int) or comment.position <= 0:
                 logger.warning(f"Invalid position {comment.position} in comment")
                 return None
-            
+
             # Sanitize content
             sanitized_comment = {
-                'body': self._sanitize_input(str(comment.body)),
-                'path': self._sanitize_input(str(comment.path)),
-                'position': comment.position
+                "body": self._sanitize_input(str(comment.body)),
+                "path": self._sanitize_input(str(comment.path)),
+                "position": comment.position,
             }
 
             # Append hidden signature marker for deduplication on future runs
             try:
-                body_with_marker = self._append_signature_marker(sanitized_comment['body'], sanitized_comment['path'])
-                sanitized_comment['body'] = body_with_marker
+                body_with_marker = self._append_signature_marker(sanitized_comment["body"], sanitized_comment["path"])
+                sanitized_comment["body"] = body_with_marker
             except Exception as marker_err:
                 logger.debug(f"Could not append signature marker: {marker_err}")
-            
+
             return sanitized_comment
-            
+
         except Exception as e:
             logger.warning(f"Error validating comment: {str(e)}")
             return None
-    
-    def _generate_review_summary(self, comments: List[ReviewComment]) -> str:
+
+    def _generate_review_summary(self, comments: list[ReviewComment]) -> str:
         """Generate a summary for the review with an executive summary of key findings."""
         is_gordon = os.environ.get("REVIEW_MODE_GORDON", "").lower() == "true"
 
@@ -741,12 +738,14 @@ class GitHubClient:
         for comment in comments:
             priority = comment.priority.value
             priority_counts[priority] = priority_counts.get(priority, 0) + 1
-            category = getattr(comment, 'category', None) or 'general'
+            category = getattr(comment, "category", None) or "general"
             category_counts[category] = category_counts.get(category, 0) + 1
 
         if is_gordon:
             summary_parts = ["👨‍🍳🔥 **CHEF RAMSAY'S CODE KITCHEN**"]
-            summary_parts.append(f"\nRIGHT THEN! I've looked at this mess and found **{len(comments)}** things that need fixing!")
+            summary_parts.append(
+                f"\nRIGHT THEN! I've looked at this mess and found **{len(comments)}** things that need fixing!"
+            )
         else:
             summary_parts = ["🤖 **Gemini AI Code Review**"]
             summary_parts.append(f"\nFound **{len(comments)}** suggestions for improvement:")
@@ -758,7 +757,7 @@ class GitHubClient:
                 "critical": "🔥 SHUT IT DOWN",
                 "high": "😤 UNACCEPTABLE",
                 "medium": "😠 DO BETTER",
-                "low": "🤨 COME ON"
+                "low": "🤨 COME ON",
             }
             for priority in priority_order:
                 count = priority_counts.get(priority, 0)
@@ -789,9 +788,13 @@ class GitHubClient:
                 summary_parts.append(f"- `{file_name}`: {first_line}")
 
         if is_gordon:
-            summary_parts.append(f"\n> 👨‍🍳 Now get back in there and FIX IT! I believe in you, but this code is NOT ready for service!")
+            summary_parts.append(
+                "\n> 👨‍🍳 Now get back in there and FIX IT! I believe in you, but this code is NOT ready for service!"
+            )
         else:
-            summary_parts.append(f"\n> This review was automatically generated by Gemini AI. Please review the suggestions carefully.")
+            summary_parts.append(
+                "\n> This review was automatically generated by Gemini AI. Please review the suggestions carefully."
+            )
 
         return "\n".join(summary_parts)
 
@@ -816,7 +819,7 @@ class GitHubClient:
             "- All previously reported issues appear to be resolved.\n\n"
             "> If you believe something was missed, feel free to re-run the review after additional changes."
         )
-    
+
     def _generate_filtered_message(self, total_comments: int) -> str:
         """Generate a message when comments were found but filtered by thresholds or limits."""
         return (
@@ -825,7 +828,7 @@ class GitHubClient:
             f"The code was reviewed with project context and related files for comprehensive analysis.\n\n"
             f"> You can adjust REVIEW_PRIORITY_THRESHOLD, MAX_COMMENTS_TOTAL, or MAX_COMMENTS_PER_FILE to see more inline suggestions."
         )
-    
+
     @staticmethod
     def _sanitize_input(text: str) -> str:
         """Lightly sanitize text while preserving Markdown and code formatting.
@@ -835,14 +838,14 @@ class GitHubClient:
         """
         if not isinstance(text, str):
             return str(text) if text is not None else ""
-        
-        cleaned = ''.join(ch for ch in text if (ord(ch) >= 32) or ch in '\t\n\r')
+
+        cleaned = "".join(ch for ch in text if (ord(ch) >= 32) or ch in "\t\n\r")
         return cleaned.strip()
-    
+
     def _strip_signature_marker(self, body: str) -> str:
         """Remove hidden AI signature marker from a comment body, if present."""
         try:
-            return re.sub(r'<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->\s*$', '', body or '', flags=re.IGNORECASE).strip()
+            return re.sub(r"<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->\s*$", "", body or "", flags=re.IGNORECASE).strip()
         except Exception:
             return body
 
@@ -850,13 +853,13 @@ class GitHubClient:
         """Normalize text to compute a stable signature: lowercase, collapse whitespace, strip marker."""
         base = self._sanitize_input(text or "")
         base = self._strip_signature_marker(base)
-        base = re.sub(r'\s+', ' ', base).strip().lower()
+        base = re.sub(r"\s+", " ", base).strip().lower()
         return base
 
     def _compute_signature(self, path: str, body: str) -> str:
         """Compute a stable signature for a comment using path + normalized body."""
         norm = self._normalize_for_signature(body)
-        h = hashlib.sha1(f"{path}|{norm}".encode('utf-8')).hexdigest()[:12]
+        h = hashlib.sha1(f"{path}|{norm}".encode()).hexdigest()[:12]
         return f"{path}:{h}"
 
     def _append_signature_marker(self, body: str, path: str) -> str:
@@ -865,31 +868,31 @@ class GitHubClient:
             if not body:
                 body = ""
             # If already has a marker, don't add another
-            if re.search(r'<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->', body or '', flags=re.IGNORECASE):
+            if re.search(r"<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->", body or "", flags=re.IGNORECASE):
                 return body
             sig = self._compute_signature(path, body).split(":")[-1]
             return f"{body}\n<!-- AI-SIG:{sig} -->"
         except Exception:
             return body
 
-    def get_existing_comment_signatures(self, pr_details: PRDetails) -> Set[str]:
+    def get_existing_comment_signatures(self, pr_details: PRDetails) -> set[str]:
         """Fetch existing PR review comments and build a set of signatures to avoid duplicates."""
         try:
             repo_obj = self._get_repo_with_retry(pr_details.repo_full_name)
             pr = self._get_pr_with_retry(repo_obj, pr_details.pull_number)
-            sigs: Set[str] = set()
+            sigs: set[str] = set()
             try:
                 existing_comments = pr.get_review_comments()
             except Exception:
                 existing_comments = []
             for c in existing_comments:
                 try:
-                    path = getattr(c, 'path', None)
+                    path = getattr(c, "path", None)
                     if not path:
                         continue
-                    body = getattr(c, 'body', '') or ''
+                    body = getattr(c, "body", "") or ""
                     # Prefer embedded signature if present
-                    m = re.search(r'<!--\s*AI-SIG:([a-f0-9]{6,})\s*-->', body, flags=re.IGNORECASE)
+                    m = re.search(r"<!--\s*AI-SIG:([a-f0-9]{6,})\s*-->", body, flags=re.IGNORECASE)
                     if m:
                         sigs.add(f"{path}:{m.group(1)[:12]}")
                     # Also add computed signature from normalized body
@@ -903,7 +906,7 @@ class GitHubClient:
             logger.debug(f"Could not fetch existing review comments: {e}")
             return set()
 
-    def get_existing_bot_comments(self, pr_details: PRDetails) -> List[Dict[str, Any]]:
+    def get_existing_bot_comments(self, pr_details: PRDetails) -> list[dict[str, Any]]:
         """Fetch existing *root* bot review comments (not follow-up replies) for follow-up reviews.
 
         Returns a list of dicts with keys: path, line, body, created_at, id, comment_obj
@@ -935,35 +938,37 @@ class GitHubClient:
 
             for c in existing_comments:
                 try:
-                    path = getattr(c, 'path', None)
-                    body = getattr(c, 'body', '') or ''
+                    path = getattr(c, "path", None)
+                    body = getattr(c, "body", "") or ""
 
                     # Skip reply comments — these are follow-up replies, not original review findings.
                     # This is the primary fix for the duplicate follow-up spam bug.
-                    in_reply_to = getattr(c, 'in_reply_to_id', None)
+                    in_reply_to = getattr(c, "in_reply_to_id", None)
                     if in_reply_to is not None:
                         continue
 
                     # Check if this is a bot comment (has AI-SIG marker or is from bot user)
-                    has_ai_sig = bool(re.search(r'<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->', body, flags=re.IGNORECASE))
-                    user = getattr(c, 'user', None)
-                    username = getattr(user, 'login', '') if user else ''
+                    has_ai_sig = bool(re.search(r"<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->", body, flags=re.IGNORECASE))
+                    user = getattr(c, "user", None)
+                    username = getattr(user, "login", "") if user else ""
                     is_bot_user = current_user and username == current_user
 
                     if has_ai_sig or is_bot_user:
                         # Clean the body of signature markers for display
                         cleaned_body = self._strip_signature_marker(body)
 
-                        bot_comments.append({
-                            'path': path,
-                            'line': getattr(c, 'original_line', getattr(c, 'line', None)),
-                            'position': getattr(c, 'position', getattr(c, 'original_position', None)),
-                            'original_position': getattr(c, 'original_position', None),
-                            'body': cleaned_body,
-                            'created_at': str(getattr(c, 'created_at', '')),
-                            'id': getattr(c, 'id', None),
-                            'comment_obj': c  # Store the full comment object for resolution
-                        })
+                        bot_comments.append(
+                            {
+                                "path": path,
+                                "line": getattr(c, "original_line", getattr(c, "line", None)),
+                                "position": getattr(c, "position", getattr(c, "original_position", None)),
+                                "original_position": getattr(c, "original_position", None),
+                                "body": cleaned_body,
+                                "created_at": str(getattr(c, "created_at", "")),
+                                "id": getattr(c, "id", None),
+                                "comment_obj": c,  # Store the full comment object for resolution
+                            }
+                        )
                 except Exception:
                     continue
 
@@ -974,7 +979,7 @@ class GitHubClient:
             logger.warning(f"Could not fetch existing bot review comments: {e}")
             return []
 
-    def filter_out_existing_comments(self, pr_details: PRDetails, comments: List[ReviewComment]) -> List[ReviewComment]:
+    def filter_out_existing_comments(self, pr_details: PRDetails, comments: list[ReviewComment]) -> list[ReviewComment]:
         """Filter out comments that match signatures of existing PR comments; also dedupe within batch.
         Enhancements:
         - Skip comments that were already posted (by checking hidden/body-based signatures).
@@ -988,6 +993,7 @@ class GitHubClient:
             def priority_value(p):
                 try:
                     from .models import ReviewPriority as _RP
+
                     order = {
                         _RP.CRITICAL: 4,
                         _RP.HIGH: 3,
@@ -998,12 +1004,12 @@ class GitHubClient:
                 except Exception:
                     return 1
 
-            filtered: List[ReviewComment] = []
-            seen_sigs: Set[str] = set()
+            filtered: list[ReviewComment] = []
+            seen_sigs: set[str] = set()
             # key: (path, position) -> index in filtered list
-            group_index: Dict[str, int] = {}
+            group_index: dict[str, int] = {}
             # store normalized bodies to compare similarity for the kept comment in each group
-            kept_norm_body: Dict[str, str] = {}
+            kept_norm_body: dict[str, str] = {}
 
             skipped_existing = 0
             skipped_same_line = 0
@@ -1016,7 +1022,7 @@ class GitHubClient:
                         continue
 
                     # Batch dedupe by same file+position with fuzzy body similarity
-                    pos = getattr(cm, 'position', None) or getattr(cm, 'line_number', None)
+                    pos = getattr(cm, "position", None) or getattr(cm, "line_number", None)
                     key = f"{cm.path}::{pos}"
                     norm_body = self._normalize_for_signature(cm.body)
 
@@ -1029,14 +1035,18 @@ class GitHubClient:
                             ratio = difflib.SequenceMatcher(None, prev_norm, norm_body).ratio()
                         except Exception:
                             ratio = 0.0
-                        similar = ratio >= 0.8 or (prev_norm and norm_body and (prev_norm in norm_body or norm_body in prev_norm))
+                        similar = ratio >= 0.8 or (
+                            prev_norm and norm_body and (prev_norm in norm_body or norm_body in prev_norm)
+                        )
 
                         if similar:
                             # Decide which one to keep
                             keep_new = False
-                            if priority_value(cm.priority) > priority_value(prev.priority):
-                                keep_new = True
-                            elif priority_value(cm.priority) == priority_value(prev.priority) and len(cm.body or '') > len(prev.body or ''):
+                            if (
+                                priority_value(cm.priority) > priority_value(prev.priority)
+                                or priority_value(cm.priority) == priority_value(prev.priority)
+                                and len(cm.body or "") > len(prev.body or "")
+                            ):
                                 keep_new = True
 
                             if keep_new:
@@ -1070,146 +1080,212 @@ class GitHubClient:
             logger.debug(f"Deduplication failed (continuing without dedupe): {e}")
             return comments
 
-
-    def get_comment_replies(self, pr_details: PRDetails, comment_id: int) -> List[Dict[str, Any]]:
+    def get_comment_replies(self, pr_details: PRDetails, comment_id: int) -> list[dict[str, Any]]:
         """Fetch all replies to a specific review comment.
-        
+
         Args:
             pr_details: Pull request details
             comment_id: The ID of the review comment to fetch replies for
-            
+
         Returns:
             List of reply comment dictionaries with 'id', 'body', 'user' fields
         """
         try:
             # Use GitHub REST API to fetch all review comments
             url = f"https://api.github.com/repos/{pr_details.owner}/{pr_details.repo}/pulls/{pr_details.pull_number}/comments"
-            
-            headers = {
-                "Authorization": f"Bearer {self.config.token}",
-                "Accept": "application/vnd.github.v3+json"
-            }
-            
-            response = requests.get(
-                url,
-                headers=headers,
-                timeout=self.config.timeout
-            )
-            
+
+            headers = {"Authorization": f"Bearer {self.config.token}", "Accept": "application/vnd.github.v3+json"}
+
+            response = requests.get(url, headers=headers, timeout=self.config.timeout)
+
             if response.status_code == 200:
                 all_comments = response.json()
-                
+
                 # First, find the target comment to get its conversation details
                 target_comment = None
                 for c in all_comments:
-                    if c.get('id') == comment_id:
+                    if c.get("id") == comment_id:
                         target_comment = c
                         break
-                
+
                 if not target_comment:
                     logger.debug(f"Target comment {comment_id} not found in PR comments")
                     return []
-                
+
                 # Get the path and position of the target comment
-                target_path = target_comment.get('path')
-                target_position = target_comment.get('position') or target_comment.get('original_position')
-                
+                target_path = target_comment.get("path")
+                target_position = target_comment.get("position") or target_comment.get("original_position")
+
                 # Filter for replies: either direct replies (in_reply_to_id) or same conversation thread
                 replies = []
                 for c in all_comments:
                     # Skip the target comment itself
-                    if c.get('id') == comment_id:
+                    if c.get("id") == comment_id:
                         continue
-                    
+
                     # Direct reply to our target comment
-                    if c.get('in_reply_to_id') == comment_id:
+                    if c.get("in_reply_to_id") == comment_id:
                         replies.append(c)
                         continue
-                    
+
                     # Part of the same conversation thread (same path and position)
-                    c_path = c.get('path')
-                    c_position = c.get('position') or c.get('original_position')
-                    c_reply_to = c.get('in_reply_to_id')
-                    
+                    c_path = c.get("path")
+                    c_position = c.get("position") or c.get("original_position")
+                    c_reply_to = c.get("in_reply_to_id")
+
                     # Check if this comment is in the same thread:
                     # - It's on the same path and position
                     # - It's a reply to something (part of a thread)
-                    if (c_path == target_path and 
-                        c_position == target_position and 
-                        c_reply_to is not None):
+                    if c_path == target_path and c_position == target_position and c_reply_to is not None:
                         replies.append(c)
-                
+
                 return replies
             else:
                 logger.debug(f"Failed to fetch comment replies: HTTP {response.status_code}")
                 return []
-                
+
         except Exception as e:
             logger.debug(f"Error fetching comment replies: {str(e)}")
             return []
 
-    def reply_to_comment(self, pr_details: PRDetails, comment_id: int, reply_body: str = "✅ This has been fixed thank you") -> bool:
+    def get_authenticated_login(self) -> str | None:
+        """Best-effort login of the token identity (used as a loop guard)."""
+        try:
+            return self._client.get_user().login
+        except Exception:
+            return None
+
+    def get_review_comment_thread(self, pr_details: PRDetails, comment_id: int) -> dict[str, Any] | None:
+        """Fetch the full review-comment thread that `comment_id` belongs to.
+
+        Returns a dict:
+          {root_id, root_body, root_author, root_is_bot, code_context (diff_hunk),
+           messages: [{author, body, is_bot}] oldest-first, bot_login}
+        or None if it can't be resolved. Used to respond to human replies on the
+        bot's own review threads.
+        """
+        try:
+            url = f"https://api.github.com/repos/{pr_details.owner}/{pr_details.repo}/pulls/{pr_details.pull_number}/comments"
+            headers = {"Authorization": f"Bearer {self.config.token}", "Accept": "application/vnd.github.v3+json"}
+            response = requests.get(url, headers=headers, timeout=self.config.timeout)
+            if response.status_code != 200:
+                logger.debug(f"Could not fetch review comments for thread: HTTP {response.status_code}")
+                return None
+            all_comments = response.json()
+            by_id = {c.get("id"): c for c in all_comments}
+            target = by_id.get(comment_id)
+            if not target:
+                return None
+            # Walk to the thread root (the comment with no in_reply_to_id).
+            root = target
+            seen = set()
+            while root.get("in_reply_to_id") and root.get("in_reply_to_id") in by_id and root.get("id") not in seen:
+                seen.add(root.get("id"))
+                root = by_id[root["in_reply_to_id"]]
+            root_id = root.get("id")
+            root_path = root.get("path")
+            root_pos = root.get("position") or root.get("original_position")
+            # Collect the thread: the root + everything replying into it (or same path+position).
+            thread = [root]
+            for c in all_comments:
+                if c.get("id") == root_id:
+                    continue
+                if c.get("in_reply_to_id") == root_id or (
+                    c.get("in_reply_to_id") is not None
+                    and c.get("path") == root_path
+                    and (c.get("position") or c.get("original_position")) == root_pos
+                ):
+                    thread.append(c)
+            thread.sort(key=lambda c: c.get("created_at") or "")
+
+            bot_login = self.get_authenticated_login()
+
+            def _is_bot(c: dict[str, Any]) -> bool:
+                body = c.get("body", "") or ""
+                if re.search(r"<!--\s*AI-SIG:[a-f0-9]{6,}\s*-->", body, flags=re.IGNORECASE):
+                    return True
+                author = (c.get("user") or {}).get("login", "")
+                return bool(bot_login and author == bot_login) or author.endswith("[bot]")
+
+            messages = [
+                {
+                    "author": (c.get("user") or {}).get("login", "unknown"),
+                    "body": self._strip_signature_marker(c.get("body", "") or ""),
+                    "is_bot": _is_bot(c),
+                }
+                for c in thread
+            ]
+            return {
+                "root_id": root_id,
+                "root_body": self._strip_signature_marker(root.get("body", "") or ""),
+                "root_author": (root.get("user") or {}).get("login", ""),
+                "root_is_bot": _is_bot(root),
+                "code_context": root.get("diff_hunk", "") or "",
+                "messages": messages,
+                "bot_login": bot_login,
+            }
+        except Exception as e:
+            logger.debug(f"Error fetching review comment thread: {e}")
+            return None
+
+    def reply_to_comment(
+        self, pr_details: PRDetails, comment_id: int, reply_body: str = "✅ This has been fixed thank you"
+    ) -> bool:
         """Post a reply to an existing review comment.
-        
+
         This method posts a reply comment to indicate that an issue has been resolved.
         Checks if the same reply already exists to avoid duplicate comments.
-        
+
         Args:
             pr_details: Pull request details
             comment_id: The ID of the review comment to reply to
             reply_body: The text of the reply (default: "✅ This has been fixed thank you")
-            
+
         Returns:
             True if successful or reply already exists, False otherwise
         """
         try:
             # First, check if this reply already exists on the thread
             existing_replies = self.get_comment_replies(pr_details, comment_id)
-            
+
             # Normalize the reply body for comparison (strip whitespace, lowercase)
             normalized_reply = reply_body.strip().lower()
-            
+
             for reply in existing_replies:
-                existing_body = reply.get('body', '')
+                existing_body = reply.get("body", "")
                 if existing_body.strip().lower() == normalized_reply:
                     logger.info(f"Reply already exists on comment {comment_id}, skipping duplicate")
                     return True
-            
+
             # Use GitHub REST API to post a reply to the comment
             # Endpoint: POST /repos/{owner}/{repo}/pulls/{pull_number}/comments
             # We need to use in_reply_to parameter to specify which comment we're replying to
             url = f"https://api.github.com/repos/{pr_details.owner}/{pr_details.repo}/pulls/{pr_details.pull_number}/comments"
-            
+
             headers = {
                 "Authorization": f"Bearer {self.config.token}",
                 "Accept": "application/vnd.github.v3+json",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
-            
-            payload = {
-                "body": reply_body,
-                "in_reply_to": comment_id
-            }
-            
-            response = requests.post(
-                url,
-                json=payload,
-                headers=headers,
-                timeout=self.config.timeout
-            )
-            
+
+            payload = {"body": reply_body, "in_reply_to": comment_id}
+
+            response = requests.post(url, json=payload, headers=headers, timeout=self.config.timeout)
+
             if response.status_code == 201:
                 logger.info(f"✅ Successfully posted reply to comment {comment_id}")
                 return True
             else:
-                logger.warning(f"Failed to reply to comment {comment_id}: HTTP {response.status_code} - {response.text}")
+                logger.warning(
+                    f"Failed to reply to comment {comment_id}: HTTP {response.status_code} - {response.text}"
+                )
                 return False
-                
+
         except Exception as e:
             logger.warning(f"Failed to reply to comment {comment_id}: {str(e)}")
             return False
 
-    def get_file_review_comments(self, pr_details: PRDetails, file_path: str, limit: int = 30) -> Optional[str]:
+    def get_file_review_comments(self, pr_details: PRDetails, file_path: str, limit: int = 30) -> str | None:
         """Get previous inline review comments for a specific file in the PR.
         Returns a formatted plain-text summary or None if none found.
         """
@@ -1219,13 +1295,13 @@ class GitHubClient:
             comments = []
             for c in pr.get_review_comments():
                 try:
-                    path = getattr(c, 'path', None)
+                    path = getattr(c, "path", None)
                     if path != file_path:
                         continue
-                    body = getattr(c, 'body', '') or ''
-                    author = getattr(getattr(c, 'user', None), 'login', '') or 'unknown'
-                    created = getattr(c, 'created_at', None)
-                    created_str = created.isoformat() if getattr(created, 'isoformat', None) else str(created)
+                    body = getattr(c, "body", "") or ""
+                    author = getattr(getattr(c, "user", None), "login", "") or "unknown"
+                    created = getattr(c, "created_at", None)
+                    created_str = created.isoformat() if getattr(created, "isoformat", None) else str(created)
                     if not body:
                         continue
                     comments.append((created, f"[{created_str}] {author}: {body}"))
@@ -1242,133 +1318,123 @@ class GitHubClient:
             logger.debug(f"Failed to fetch previous comments for {file_path}: {e}")
             return None
 
-    def get_repository_info(self, owner: str, repo: str) -> Dict[str, Any]:
+    def get_repository_info(self, owner: str, repo: str) -> dict[str, Any]:
         """Get repository information."""
         try:
             repo_obj = self._get_repo_with_retry(f"{owner}/{repo}")
             return {
-                'name': repo_obj.name,
-                'full_name': repo_obj.full_name,
-                'description': repo_obj.description,
-                'language': repo_obj.language,
-                'default_branch': repo_obj.default_branch,
-                'private': repo_obj.private,
-                'size': repo_obj.size,
-                'stargazers_count': repo_obj.stargazers_count
+                "name": repo_obj.name,
+                "full_name": repo_obj.full_name,
+                "description": repo_obj.description,
+                "language": repo_obj.language,
+                "default_branch": repo_obj.default_branch,
+                "private": repo_obj.private,
+                "size": repo_obj.size,
+                "stargazers_count": repo_obj.stargazers_count,
             }
         except Exception as e:
             logger.warning(f"Failed to get repository info: {str(e)}")
             return {}
-    
-    def get_pr_files(self, owner: str, repo: str, pull_number: int) -> List[Dict[str, Any]]:
+
+    def get_pr_files(self, owner: str, repo: str, pull_number: int) -> list[dict[str, Any]]:
         """Get list of files changed in a PR."""
         try:
             repo_obj = self._get_repo_with_retry(f"{owner}/{repo}")
             pr = self._get_pr_with_retry(repo_obj, pull_number)
-            
+
             files = []
             for file in pr.get_files():
-                files.append({
-                    'filename': file.filename,
-                    'status': file.status,  # added, removed, modified, renamed
-                    'additions': file.additions,
-                    'deletions': file.deletions,
-                    'changes': file.changes,
-                    'patch': getattr(file, 'patch', None)
-                })
-            
+                files.append(
+                    {
+                        "filename": file.filename,
+                        "status": file.status,  # added, removed, modified, renamed
+                        "additions": file.additions,
+                        "deletions": file.deletions,
+                        "changes": file.changes,
+                        "patch": getattr(file, "patch", None),
+                    }
+                )
+
             logger.info(f"Retrieved {len(files)} files from PR #{pull_number}")
             return files
-            
+
         except Exception as e:
             logger.error(f"Failed to get PR files: {str(e)}")
             return []
-    
-    def get_file_content(self, owner: str, repo: str, file_path: str, ref: str) -> Optional[str]:
+
+    def get_file_content(self, owner: str, repo: str, file_path: str, ref: str) -> str | None:
         """Get the content of a file from the repository at a specific ref (branch/commit).
-        
+
         Args:
             owner: Repository owner
             repo: Repository name
             file_path: Path to the file in the repository
             ref: Git reference (branch name, commit SHA, etc.)
-        
+
         Returns:
             File content as string, or None if file cannot be retrieved
         """
         try:
             repo_obj = self._get_repo_with_retry(f"{owner}/{repo}")
-            
+
             # Get file content at the specified ref
             try:
                 content_file = repo_obj.get_contents(file_path, ref=ref)
-                
+
                 # Handle if it's a file (not a directory)
-                if hasattr(content_file, 'decoded_content'):
-                    decoded_content = content_file.decoded_content.decode('utf-8')
+                if hasattr(content_file, "decoded_content"):
+                    decoded_content = content_file.decoded_content.decode("utf-8")
                     logger.debug(f"Retrieved content for {file_path} at {ref} ({len(decoded_content)} chars)")
                     return decoded_content
                 else:
                     logger.warning(f"Path {file_path} is not a file")
                     return None
-                    
+
             except Exception as e:
                 # File might not exist at this ref (e.g., newly added file)
                 logger.debug(f"Could not get file content for {file_path} at {ref}: {str(e)}")
                 return None
-                
+
         except Exception as e:
             logger.warning(f"Failed to get file content: {str(e)}")
             return None
-    
-    def check_rate_limit(self) -> Dict[str, Any]:
+
+    def check_rate_limit(self) -> dict[str, Any]:
         """Check GitHub API rate limit status."""
         try:
             rate_limit = self._client.get_rate_limit()
             logger.debug(f"Rate limit object type: {type(rate_limit)}")
             logger.debug(f"Rate limit attributes: {dir(rate_limit)}")
-            
+
             # Handle different PyGithub versions
-            if hasattr(rate_limit, 'core'):
+            if hasattr(rate_limit, "core"):
                 return {
-                    'core': {
-                        'limit': rate_limit.core.limit,
-                        'remaining': rate_limit.core.remaining,
-                        'reset': rate_limit.core.reset.timestamp()
+                    "core": {
+                        "limit": rate_limit.core.limit,
+                        "remaining": rate_limit.core.remaining,
+                        "reset": rate_limit.core.reset.timestamp(),
                     }
                 }
-            elif hasattr(rate_limit, 'rate'):
+            elif hasattr(rate_limit, "rate"):
                 # Newer PyGithub versions
                 return {
-                    'core': {
-                        'limit': rate_limit.rate.limit,
-                        'remaining': rate_limit.rate.remaining,
-                        'reset': rate_limit.rate.reset.timestamp()
+                    "core": {
+                        "limit": rate_limit.rate.limit,
+                        "remaining": rate_limit.rate.remaining,
+                        "reset": rate_limit.rate.reset.timestamp(),
                     }
                 }
             else:
                 # If structure is unknown, just return a valid response
                 logger.warning(f"Unknown rate limit structure: {rate_limit}")
-                return {
-                    'core': {
-                        'limit': 5000,
-                        'remaining': 'unknown',
-                        'reset': 'unknown'
-                    }
-                }
+                return {"core": {"limit": 5000, "remaining": "unknown", "reset": "unknown"}}
         except Exception as e:
             logger.warning(f"Failed to check rate limit: {str(e)}")
             # Return a valid structure so connection test doesn't fail
-            return {
-                'core': {
-                    'limit': 5000,
-                    'remaining': 'unknown',
-                    'reset': 'unknown'
-                }
-            }
-    
+            return {"core": {"limit": 5000, "remaining": "unknown", "reset": "unknown"}}
+
     def close(self):
         """Clean up resources."""
-        if hasattr(self, '_session'):
+        if hasattr(self, "_session"):
             self._session.close()
         logger.debug("GitHub client closed")

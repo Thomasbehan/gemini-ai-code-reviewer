@@ -7,7 +7,6 @@ import pytest
 from gemini_reviewer.diff_parser import DiffParser, DiffParsingError
 from gemini_reviewer.models import DiffFile, FileInfo, HunkInfo
 
-
 # Sample diff content for testing
 SIMPLE_DIFF = """diff --git a/main.py b/main.py
 index 1234567..abcdefg 100644
@@ -194,21 +193,15 @@ class TestDiffParserFiltering:
         files = [
             DiffFile(
                 file_info=FileInfo(path="main.py"),
-                hunks=[
-                    HunkInfo(1, 3, 1, 5, "", "", ["+a", "+b", "-c"])
-                ],
+                hunks=[HunkInfo(1, 3, 1, 5, "", "", ["+a", "+b", "-c"])],
             ),
             DiffFile(
                 file_info=FileInfo(path="utils.js"),
-                hunks=[
-                    HunkInfo(1, 1, 1, 2, "", "", ["+x"])
-                ],
+                hunks=[HunkInfo(1, 1, 1, 2, "", "", ["+x"])],
             ),
             DiffFile(
                 file_info=FileInfo(path="test_main.py"),
-                hunks=[
-                    HunkInfo(1, 1, 1, 1, "", "", ["+test"])
-                ],
+                hunks=[HunkInfo(1, 1, 1, 1, "", "", ["+test"])],
             ),
             DiffFile(
                 file_info=FileInfo(path="image.png"),
@@ -307,18 +300,15 @@ class TestFilterLargeHunks:
         truncated_hunk = result[0].hunks[0]
         # New strategy: first 40% (40) + separator (1) + last 20% (20) = 61
         assert len(truncated_hunk.lines) == 61
-        assert truncated_hunk.lines[0] == "+line0"           # head preserved
-        assert "omitted" in truncated_hunk.lines[40]         # separator in the middle
-        assert truncated_hunk.lines[-1] == "+line599"        # tail preserved
+        assert truncated_hunk.lines[0] == "+line0"  # head preserved
+        assert "omitted" in truncated_hunk.lines[40]  # separator in the middle
+        assert truncated_hunk.lines[-1] == "+line599"  # tail preserved
 
     def test_limit_hunks_per_file(self):
         """Test limiting number of hunks per file."""
         parser = DiffParser()
 
-        hunks = [
-            HunkInfo(i, 1, i, 1, "", f"@@ -{i},1 +{i},1 @@", ["+x"])
-            for i in range(30)
-        ]
+        hunks = [HunkInfo(i, 1, i, 1, "", f"@@ -{i},1 +{i},1 @@", ["+x"]) for i in range(30)]
 
         diff_file = DiffFile(
             file_info=FileInfo(path="many_hunks.py"),
@@ -374,10 +364,7 @@ class TestAnalyzeDiffComplexity:
     def test_medium_complexity(self):
         """Test medium complexity detection."""
         hunks = [HunkInfo(1, 100, 1, 100, "", "", ["+x"] * 100)]
-        files = [
-            DiffFile(FileInfo(path=f"f{i}.py"), hunks=hunks)
-            for i in range(12)
-        ]
+        files = [DiffFile(FileInfo(path=f"f{i}.py"), hunks=hunks) for i in range(12)]
 
         result = DiffParser.analyze_diff_complexity(files)
         assert result["complexity"] in ["medium", "high"]
@@ -385,10 +372,7 @@ class TestAnalyzeDiffComplexity:
     def test_high_complexity(self):
         """Test high complexity detection."""
         hunks = [HunkInfo(1, 200, 1, 200, "", "", ["+x"] * 200)]
-        files = [
-            DiffFile(FileInfo(path=f"f{i}.py"), hunks=hunks)
-            for i in range(25)
-        ]
+        files = [DiffFile(FileInfo(path=f"f{i}.py"), hunks=hunks) for i in range(25)]
 
         result = DiffParser.analyze_diff_complexity(files)
         assert result["complexity"] == "high"
@@ -448,7 +432,7 @@ Binary files /dev/null and b/file.bin differ
 """
         result = parser.parse_diff(binary_diff)
         # Binary files should be skipped
-        stats = parser.get_parsing_statistics()
+        parser.get_parsing_statistics()
         assert isinstance(result, list)
 
     def test_parse_malformed_hunk_header(self):
@@ -574,7 +558,7 @@ deleted file mode 100644
             assert result[0].total_deletions >= 0
 
 
-class TestManualParsing:
+class TestManualParsingAdditional:
     """Tests for manual diff parsing fallback."""
 
     def test_invalid_diff_header_raises(self):
@@ -702,13 +686,13 @@ Binary files /dev/null and b/image.png differ
 """
         result = parser.parse_diff(binary_diff)
         # Binary files should be skipped
-        stats = parser.get_parsing_statistics()
+        parser.get_parsing_statistics()
         # Either 0 files or skipped
         assert isinstance(result, list)
 
     def test_empty_hunk_skipped(self):
         """Test that hunks with no lines are handled."""
-        from unittest.mock import Mock, patch
+        from unittest.mock import Mock
 
         parser = DiffParser()
 
@@ -816,7 +800,7 @@ Binary files /dev/null and b/image.png differ
             "--- /dev/null",
             "+++ b/new.py",
             "@@ -0,0 +1,1 @@",
-            "+content"
+            "+content",
         ]
 
         diff_file = parser._parse_file_header(lines, 0)
@@ -833,7 +817,7 @@ Binary files /dev/null and b/image.png differ
             "--- a/old.py",
             "+++ /dev/null",
             "@@ -1,1 +0,0 @@",
-            "-content"
+            "-content",
         ]
 
         diff_file = parser._parse_file_header(lines, 0)
@@ -848,7 +832,7 @@ Binary files /dev/null and b/image.png differ
             "index 1234567..abcdefg",
             "@@ -1,1 +1,1 @@",  # Hunk header should stop status search
             "-old",
-            "+new"
+            "+new",
         ]
 
         diff_file = parser._parse_file_header(lines, 0)
@@ -1113,7 +1097,7 @@ class TestDiffParserStatistics:
         assert isinstance(stats, dict)
 
 
-class TestDiffParserEdgeCases:
+class TestDiffParserEdgeCasesAdditional:
     """Edge case tests for diff parser."""
 
     def test_empty_hunks_filtering(self):
@@ -1148,7 +1132,7 @@ class TestDiffParserFallbackParsing:
 
     def test_unidiff_empty_falls_back_to_manual(self):
         """Test that when unidiff returns empty, manual parsing is attempted."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         parser = DiffParser()
 
@@ -1162,15 +1146,15 @@ class TestDiffParserFallbackParsing:
 """
 
         # Mock unidiff to return empty PatchSet
-        with patch.object(parser, '_parse_with_unidiff', return_value=[]):
-            with patch.object(parser, '_parse_manually') as mock_manual:
+        with patch.object(parser, "_parse_with_unidiff", return_value=[]):
+            with patch.object(parser, "_parse_manually") as mock_manual:
                 mock_manual.return_value = [MagicMock()]
-                result = parser.parse_diff(diff)
+                parser.parse_diff(diff)
                 mock_manual.assert_called_once()
 
     def test_unidiff_exception_falls_back_to_manual(self):
         """Test that when unidiff raises exception, manual parsing is attempted."""
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock, patch
 
         parser = DiffParser()
 
@@ -1182,10 +1166,10 @@ class TestDiffParserFallbackParsing:
 +new
 """
 
-        with patch.object(parser, '_parse_with_unidiff', side_effect=Exception("Parse error")):
-            with patch.object(parser, '_parse_manually') as mock_manual:
+        with patch.object(parser, "_parse_with_unidiff", side_effect=Exception("Parse error")):
+            with patch.object(parser, "_parse_manually") as mock_manual:
                 mock_manual.return_value = [MagicMock()]
-                result = parser.parse_diff(diff)
+                parser.parse_diff(diff)
                 mock_manual.assert_called_once()
 
     def test_manual_parsing_exception_raises_diff_parsing_error(self):
@@ -1196,8 +1180,8 @@ class TestDiffParserFallbackParsing:
 
         diff = "invalid diff content"
 
-        with patch.object(parser, '_parse_with_unidiff', return_value=[]):
-            with patch.object(parser, '_parse_manually', side_effect=Exception("Parse failed")):
+        with patch.object(parser, "_parse_with_unidiff", return_value=[]):
+            with patch.object(parser, "_parse_manually", side_effect=Exception("Parse failed")):
                 with pytest.raises(DiffParsingError):
                     parser.parse_diff(diff)
 
@@ -1226,7 +1210,7 @@ diff --git a/file2.py b/file2.py
 """
 
         # Force manual parsing by making unidiff fail
-        with patch.object(parser, '_parse_with_unidiff', return_value=[]):
+        with patch.object(parser, "_parse_with_unidiff", return_value=[]):
             result = parser._parse_manually(multi_file_diff)
             assert isinstance(result, list)
 

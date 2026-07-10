@@ -2,8 +2,9 @@
 Comprehensive tests for gemini_reviewer/context_builder.py
 """
 
+from unittest.mock import Mock, patch
+
 import pytest
-from unittest.mock import Mock, MagicMock, patch
 
 from gemini_reviewer.context_builder import ContextBuilder
 from gemini_reviewer.models import DiffFile, FileInfo, HunkInfo, PRDetails
@@ -72,9 +73,7 @@ class TestContextBuilder:
         assert context_builder is not None
 
     @pytest.mark.asyncio
-    async def test_detect_related_files_empty_hunks(
-        self, context_builder, sample_pr_details
-    ):
+    async def test_detect_related_files_empty_hunks(self, context_builder, sample_pr_details):
         """Test detecting related files with no hunks."""
         diff_file = DiffFile(
             file_info=FileInfo(path="empty.py"),
@@ -85,25 +84,17 @@ class TestContextBuilder:
         assert isinstance(result, list)
 
     @pytest.mark.asyncio
-    async def test_detect_related_files_with_imports(
-        self, context_builder, sample_diff_file, sample_pr_details
-    ):
+    async def test_detect_related_files_with_imports(self, context_builder, sample_diff_file, sample_pr_details):
         """Test detecting related files from imports."""
-        result = await context_builder.detect_related_files(
-            sample_diff_file, sample_pr_details
-        )
+        result = await context_builder.detect_related_files(sample_diff_file, sample_pr_details)
         assert isinstance(result, list)
 
     @pytest.mark.asyncio
-    async def test_build_project_context(
-        self, context_builder, sample_diff_file, sample_pr_details
-    ):
+    async def test_build_project_context(self, context_builder, sample_diff_file, sample_pr_details):
         """Test building project context."""
         related_files = ["utils.py", "helper.py"]
 
-        result = await context_builder.build_project_context(
-            sample_diff_file, related_files, sample_pr_details
-        )
+        result = await context_builder.build_project_context(sample_diff_file, related_files, sample_pr_details)
 
         # Should return a string or None
         assert result is None or isinstance(result, str)
@@ -122,9 +113,7 @@ class HelperClass:
 """
         related_files = ["helper.py"]
 
-        result = await context_builder.build_project_context(
-            sample_diff_file, related_files, sample_pr_details
-        )
+        result = await context_builder.build_project_context(sample_diff_file, related_files, sample_pr_details)
 
         # Result should include file content
         assert result is None or isinstance(result, str)
@@ -169,20 +158,14 @@ class TestRelevanceScoring:
 
     def test_score_related_file_relevance(self, context_builder):
         """Test scoring related file relevance."""
-        score = context_builder._score_related_file_relevance(
-            "src/utils.py", "src/main.py", "+import utils"
-        )
+        score = context_builder._score_related_file_relevance("src/utils.py", "src/main.py", "+import utils")
         assert isinstance(score, (int, float))
         assert score >= 0
 
     def test_score_related_file_same_directory(self, context_builder):
         """Test scoring for files in same directory."""
-        score_same = context_builder._score_related_file_relevance(
-            "src/utils.py", "src/main.py", ""
-        )
-        score_diff = context_builder._score_related_file_relevance(
-            "tests/test_main.py", "src/main.py", ""
-        )
+        score_same = context_builder._score_related_file_relevance("src/utils.py", "src/main.py", "")
+        score_diff = context_builder._score_related_file_relevance("tests/test_main.py", "src/main.py", "")
 
         assert score_same >= 0
         assert score_diff >= 0
@@ -379,12 +362,14 @@ class TestDetectRelatedFilesAdvanced:
     async def test_detect_with_python_class_inheritance(self, sample_pr_details):
         """Test detection with Python class inheritance."""
         mock_client = Mock()
-        mock_client.get_file_content = Mock(return_value="""
+        mock_client.get_file_content = Mock(
+            return_value="""
 from base import BaseClass
 
 class MyClass(base.OtherClass):
     pass
-""")
+"""
+        )
         mock_parser = Mock()
         mock_parser.get_file_language = Mock(return_value="python")
 
@@ -402,13 +387,15 @@ class MyClass(base.OtherClass):
     async def test_detect_with_python_type_annotations(self, sample_pr_details):
         """Test detection with Python type annotations."""
         mock_client = Mock()
-        mock_client.get_file_content = Mock(return_value="""
+        mock_client.get_file_content = Mock(
+            return_value="""
 from typing import List, Optional
 from models import User
 
 def process(data: List[User]) -> Optional[Result]:
     pass
-""")
+"""
+        )
         mock_parser = Mock()
         mock_parser.get_file_language = Mock(return_value="python")
 
@@ -494,6 +481,7 @@ class TestExtractTypeRefs:
     def test_extract_simple_type(self, context_builder):
         """Test extracting simple type reference."""
         import ast
+
         tree = ast.parse("def f(x: MyClass): pass")
         func = tree.body[0]
 
@@ -506,6 +494,7 @@ class TestExtractTypeRefs:
     def test_extract_builtin_type_ignored(self, context_builder):
         """Test that builtin types are ignored."""
         import ast
+
         tree = ast.parse("def f(x: str, y: int): pass")
         func = tree.body[0]
 
@@ -518,6 +507,7 @@ class TestExtractTypeRefs:
     def test_extract_qualified_type(self, context_builder):
         """Test extracting qualified type like module.Class."""
         import ast
+
         tree = ast.parse("def f(x: models.User): pass")
         func = tree.body[0]
 
@@ -530,6 +520,7 @@ class TestExtractTypeRefs:
     def test_extract_generic_type(self, context_builder):
         """Test extracting generic types like List[T]."""
         import ast
+
         tree = ast.parse("def f(x: List[MyClass]): pass")
         func = tree.body[0]
 
@@ -543,6 +534,7 @@ class TestExtractTypeRefs:
     def test_extract_tuple_type(self, context_builder):
         """Test extracting tuple types."""
         import ast
+
         # Tuple[str, MyType] annotation
         code = "def f() -> tuple: pass"
         tree = ast.parse(code)
@@ -671,24 +663,16 @@ class TestScoreRelatedFileRelevanceAdvanced:
 
     def test_score_same_directory_bonus(self, context_builder):
         """Test same directory gets higher score."""
-        score_same = context_builder._score_related_file_relevance(
-            "src/utils.py", "src/main.py", ""
-        )
-        score_diff = context_builder._score_related_file_relevance(
-            "lib/utils.py", "src/main.py", ""
-        )
+        score_same = context_builder._score_related_file_relevance("src/utils.py", "src/main.py", "")
+        score_diff = context_builder._score_related_file_relevance("lib/utils.py", "src/main.py", "")
         # Same directory should score higher
         assert isinstance(score_same, (int, float))
         assert isinstance(score_diff, (int, float))
 
     def test_score_test_file_lower(self, context_builder):
         """Test that test files might get different scores."""
-        score_src = context_builder._score_related_file_relevance(
-            "src/utils.py", "src/main.py", ""
-        )
-        score_test = context_builder._score_related_file_relevance(
-            "tests/test_utils.py", "src/main.py", ""
-        )
+        score_src = context_builder._score_related_file_relevance("src/utils.py", "src/main.py", "")
+        score_test = context_builder._score_related_file_relevance("tests/test_utils.py", "src/main.py", "")
         assert isinstance(score_src, (int, float))
         assert isinstance(score_test, (int, float))
 
@@ -787,9 +771,7 @@ class TestContextBuilderEdgeCases:
             ],
         )
 
-        result = await context_builder.build_project_context(
-            diff_file, ["main.py"], sample_pr_details
-        )
+        result = await context_builder.build_project_context(diff_file, ["main.py"], sample_pr_details)
 
         # Result can be None or a string depending on context
         assert result is None or isinstance(result, str)
@@ -808,29 +790,21 @@ class TestContextBuilderRelevanceScoring:
     def test_score_with_import_reference(self, context_builder):
         """Test scoring when file is referenced in imports."""
         score = context_builder._score_related_file_relevance(
-            "utils.py",
-            "main.py",
-            "+import utils\n+from utils import helper"
+            "utils.py", "main.py", "+import utils\n+from utils import helper"
         )
         assert score > 0
 
     def test_score_same_package(self, context_builder):
         """Test same package gets higher score."""
-        score1 = context_builder._score_related_file_relevance(
-            "pkg/utils.py", "pkg/main.py", ""
-        )
-        score2 = context_builder._score_related_file_relevance(
-            "other/utils.py", "pkg/main.py", ""
-        )
+        score1 = context_builder._score_related_file_relevance("pkg/utils.py", "pkg/main.py", "")
+        score2 = context_builder._score_related_file_relevance("other/utils.py", "pkg/main.py", "")
         assert isinstance(score1, (int, float))
         assert isinstance(score2, (int, float))
 
     def test_score_function_reference(self, context_builder):
         """Test scoring when function is referenced."""
         score = context_builder._score_related_file_relevance(
-            "helpers.py",
-            "main.py",
-            "+result = helper_function(data)"
+            "helpers.py", "main.py", "+result = helper_function(data)"
         )
         assert isinstance(score, (int, float))
 
@@ -848,7 +822,8 @@ class TestContextBuilderExtractTypeRefs:
     def test_extract_type_refs_simple(self, context_builder):
         """Test extracting simple type references."""
         import ast
-        annotation = ast.parse("str", mode='eval').body
+
+        annotation = ast.parse("str", mode="eval").body
         seen_imports = set()
         related_files = []
 
@@ -859,7 +834,8 @@ class TestContextBuilderExtractTypeRefs:
     def test_extract_type_refs_generic(self, context_builder):
         """Test extracting generic type references."""
         import ast
-        annotation = ast.parse("List[str]", mode='eval').body
+
+        annotation = ast.parse("List[str]", mode="eval").body
         seen_imports = {"List"}
         related_files = []
 
@@ -877,8 +853,9 @@ class TestContextBuilderExtractTypeRefs:
     def test_extract_type_refs_attribute(self, context_builder):
         """Test extracting attribute type references like module.Type."""
         import ast
+
         # Parse an expression like 'typing.List'
-        annotation = ast.parse("typing.List", mode='eval').body
+        annotation = ast.parse("typing.List", mode="eval").body
         seen_imports = set()
         related_files = []
 
@@ -888,7 +865,8 @@ class TestContextBuilderExtractTypeRefs:
     def test_extract_type_refs_subscript(self, context_builder):
         """Test extracting subscript type references like List[str]."""
         import ast
-        annotation = ast.parse("Dict[str, int]", mode='eval').body
+
+        annotation = ast.parse("Dict[str, int]", mode="eval").body
         seen_imports = set()
         related_files = []
 
@@ -898,7 +876,8 @@ class TestContextBuilderExtractTypeRefs:
     def test_extract_type_refs_custom_type(self, context_builder):
         """Test extracting custom type that's not a builtin."""
         import ast
-        annotation = ast.parse("MyCustomClass", mode='eval').body
+
+        annotation = ast.parse("MyCustomClass", mode="eval").body
         seen_imports = set()
         related_files = []
 
@@ -926,12 +905,14 @@ class TestContextBuilderDetectRelatedFilesAdvanced:
     async def test_detect_related_files_with_python_imports(self, sample_pr_details):
         """Test detecting related files from Python imports."""
         mock_client = Mock()
-        mock_client.get_file_content = Mock(return_value="""
+        mock_client.get_file_content = Mock(
+            return_value="""
 import os
 import sys
 from utils import helper
 from models import User
-""")
+"""
+        )
         mock_parser = Mock()
         mock_parser.get_file_language = Mock(return_value="python")
         builder = ContextBuilder(mock_client, mock_parser)
@@ -958,12 +939,14 @@ from models import User
     async def test_detect_related_files_with_javascript_imports(self, sample_pr_details):
         """Test detecting related files from JavaScript imports."""
         mock_client = Mock()
-        mock_client.get_file_content = Mock(return_value="""
+        mock_client.get_file_content = Mock(
+            return_value="""
 import React from 'react';
 import { useState } from 'react';
 import utils from './utils';
 const helper = require('./helper');
-""")
+"""
+        )
         mock_parser = Mock()
         mock_parser.get_file_language = Mock(return_value="javascript")
         builder = ContextBuilder(mock_client, mock_parser)
@@ -990,14 +973,16 @@ const helper = require('./helper');
     async def test_detect_related_files_with_go_imports(self, sample_pr_details):
         """Test detecting related files from Go imports."""
         mock_client = Mock()
-        mock_client.get_file_content = Mock(return_value="""
+        mock_client.get_file_content = Mock(
+            return_value="""
 package main
 
 import (
     "fmt"
     "github.com/user/pkg/utils"
 )
-""")
+"""
+        )
         mock_parser = Mock()
         mock_parser.get_file_language = Mock(return_value="go")
         builder = ContextBuilder(mock_client, mock_parser)
@@ -1024,11 +1009,13 @@ import (
     async def test_detect_related_files_with_ruby_imports(self, sample_pr_details):
         """Test detecting related files from Ruby imports."""
         mock_client = Mock()
-        mock_client.get_file_content = Mock(return_value="""
+        mock_client.get_file_content = Mock(
+            return_value="""
 require 'json'
 require_relative 'utils'
 load 'helper.rb'
-""")
+"""
+        )
         mock_parser = Mock()
         mock_parser.get_file_language = Mock(return_value="ruby")
         builder = ContextBuilder(mock_client, mock_parser)
@@ -1055,7 +1042,8 @@ load 'helper.rb'
     async def test_detect_related_files_with_class_inheritance(self, sample_pr_details):
         """Test detecting related files from Python class inheritance."""
         mock_client = Mock()
-        mock_client.get_file_content = Mock(return_value="""
+        mock_client.get_file_content = Mock(
+            return_value="""
 from base import BaseClass
 
 class MyClass(BaseClass):
@@ -1063,7 +1051,8 @@ class MyClass(BaseClass):
 
 class Child(module.ParentClass):
     pass
-""")
+"""
+        )
         mock_parser = Mock()
         mock_parser.get_file_language = Mock(return_value="python")
         builder = ContextBuilder(mock_client, mock_parser)
@@ -1090,7 +1079,8 @@ class Child(module.ParentClass):
     async def test_detect_related_files_with_type_annotations(self, sample_pr_details):
         """Test detecting related files from Python type annotations."""
         mock_client = Mock()
-        mock_client.get_file_content = Mock(return_value="""
+        mock_client.get_file_content = Mock(
+            return_value="""
 from typing import List, Optional
 from models import User, Order
 
@@ -1099,7 +1089,8 @@ def process_users(users: List[User]) -> Optional[Order]:
 
 async def fetch_data(config: Config) -> Response:
     pass
-""")
+"""
+        )
         mock_parser = Mock()
         mock_parser.get_file_language = Mock(return_value="python")
         builder = ContextBuilder(mock_client, mock_parser)
@@ -1126,10 +1117,12 @@ async def fetch_data(config: Config) -> Response:
     async def test_detect_related_files_syntax_error(self, sample_pr_details):
         """Test handling Python syntax errors gracefully."""
         mock_client = Mock()
-        mock_client.get_file_content = Mock(return_value="""
+        mock_client.get_file_content = Mock(
+            return_value="""
 def broken_function(
     # This has a syntax error - missing closing paren
-""")
+"""
+        )
         mock_parser = Mock()
         mock_parser.get_file_language = Mock(return_value="python")
         builder = ContextBuilder(mock_client, mock_parser)
@@ -1221,7 +1214,7 @@ class TestContextBuilderFindReverseDependencies:
 
     def test_find_reverse_deps_exception_handling(self, context_builder):
         """Test that exceptions are handled gracefully."""
-        with patch('os.listdir', side_effect=OSError("Access denied")):
+        with patch("os.listdir", side_effect=OSError("Access denied")):
             # Force re-scan so the patched listdir is hit
             context_builder._repo_scanned = False
             result = context_builder._find_reverse_dependencies("main.py")
@@ -1229,20 +1222,20 @@ class TestContextBuilderFindReverseDependencies:
 
     def test_find_reverse_deps_with_files(self, context_builder):
         """Test finding reverse dependencies."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create test files
             main_py = os.path.join(tmpdir, "main.py")
             utils_py = os.path.join(tmpdir, "utils.py")
 
-            with open(main_py, 'w') as f:
+            with open(main_py, "w") as f:
                 f.write("from utils import helper\n")
-            with open(utils_py, 'w') as f:
+            with open(utils_py, "w") as f:
                 f.write("def helper(): pass\n")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._find_reverse_dependencies("utils.py")
                 assert isinstance(result, list)
 
@@ -1259,7 +1252,7 @@ class TestContextBuilderFindFunctionCallers:
 
     def test_find_callers_no_repo_root(self, context_builder):
         """Test when repo root doesn't exist."""
-        with patch('os.path.exists', return_value=False):
+        with patch("os.path.exists", return_value=False):
             result = context_builder._find_function_callers("main.py", "+def my_func():")
             assert result == []
 
@@ -1283,7 +1276,7 @@ class TestContextBuilderPrioritizeContext:
         """Test prioritizing empty sections."""
         result = context_builder._prioritize_context_sections(
             [],  # sections as List[Dict]
-            1000  # max_size
+            1000,  # max_size
         )
         assert isinstance(result, list)
 
@@ -1294,10 +1287,7 @@ class TestContextBuilderPrioritizeContext:
             {"type": "functions", "content": "def main(): pass", "priority": 2},
             {"type": "classes", "content": "class MyClass: pass", "priority": 3},
         ]
-        result = context_builder._prioritize_context_sections(
-            sections,
-            1000
-        )
+        result = context_builder._prioritize_context_sections(sections, 1000)
         assert isinstance(result, list)
 
     def test_prioritize_exceeds_budget(self, context_builder):
@@ -1309,7 +1299,7 @@ class TestContextBuilderPrioritizeContext:
         ]
         result = context_builder._prioritize_context_sections(
             sections,
-            100  # Very small budget
+            100,  # Very small budget
         )
         assert isinstance(result, list)
 
@@ -1331,8 +1321,8 @@ class TestContextBuilderFindTestFiles:
 
     def test_find_test_files_with_tests(self, context_builder):
         """Test finding test files."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create test directory structure
@@ -1341,10 +1331,10 @@ class TestContextBuilderFindTestFiles:
 
             # Create test file
             test_file = os.path.join(tests_dir, "test_main.py")
-            with open(test_file, 'w') as f:
+            with open(test_file, "w") as f:
                 f.write("def test_main(): pass\n")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._find_test_files("main.py")
                 assert isinstance(result, list)
 
@@ -1364,22 +1354,22 @@ class TestContextBuilderFindConfigFiles:
         # Clear cached config files so the method re-scans
         context_builder._cached_config_files = None
         context_builder._repo_scanned = False
-        with patch('os.listdir', side_effect=OSError("Access denied")):
+        with patch("os.listdir", side_effect=OSError("Access denied")):
             result = context_builder._find_config_files()
             assert result == []
 
     def test_find_config_files_with_configs(self, context_builder):
         """Test finding config files."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create config files
             pyproject = os.path.join(tmpdir, "pyproject.toml")
-            with open(pyproject, 'w') as f:
+            with open(pyproject, "w") as f:
                 f.write("[project]\nname = 'test'\n")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._find_config_files()
                 assert isinstance(result, list)
 
@@ -1401,8 +1391,8 @@ class TestContextBuilderBuildRepoMentalModel:
 
     def test_build_mental_model_with_files(self, context_builder):
         """Test building mental model."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create some files
@@ -1410,10 +1400,10 @@ class TestContextBuilderBuildRepoMentalModel:
             os.makedirs(src_dir)
 
             main_py = os.path.join(src_dir, "main.py")
-            with open(main_py, 'w') as f:
+            with open(main_py, "w") as f:
                 f.write("def main(): pass\n")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._build_repo_mental_model()
                 assert isinstance(result, str)
 
@@ -1435,13 +1425,13 @@ class TestContextBuilderExtractCodeSignatures:
 
     def test_extract_signatures_with_python_files(self, context_builder):
         """Test extracting signatures from Python files."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create Python file with functions and classes
             main_py = os.path.join(tmpdir, "main.py")
-            with open(main_py, 'w') as f:
+            with open(main_py, "w") as f:
                 f.write("""
 def function_one():
     pass
@@ -1451,19 +1441,19 @@ class MyClass:
         pass
 """)
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._extract_code_signatures(max_files=5)
                 assert isinstance(result, str)
 
     def test_extract_signatures_with_js_files(self, context_builder):
         """Test extracting signatures from JavaScript files."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create JavaScript file
             main_js = os.path.join(tmpdir, "main.js")
-            with open(main_js, 'w') as f:
+            with open(main_js, "w") as f:
                 f.write("""
 function doSomething() {}
 
@@ -1474,7 +1464,7 @@ class Component {
 }
 """)
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._extract_code_signatures(max_files=5)
                 assert isinstance(result, str)
 
@@ -1498,32 +1488,32 @@ class TestContextBuilderLocalFileFallback:
     @pytest.mark.asyncio
     async def test_build_context_with_local_file_fallback(self, context_builder, sample_pr_details):
         """Test fallback to local file when GitHub returns None."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create local file
             test_file = os.path.join(tmpdir, "local_test.py")
-            with open(test_file, 'w') as f:
+            with open(test_file, "w") as f:
                 f.write("def local_function():\n    pass\n")
 
             diff_file = DiffFile(
                 file_info=FileInfo(path="local_test.py"),
                 hunks=[
                     HunkInfo(
-                        source_start=1, source_length=2,
-                        target_start=1, target_length=2,
+                        source_start=1,
+                        source_length=2,
+                        target_start=1,
+                        target_length=2,
                         content="def local_function():\n    pass",
                         header="@@ -1,2 +1,2 @@",
-                        lines=["+def local_function():", "+    pass"]
+                        lines=["+def local_function():", "+    pass"],
                     )
-                ]
+                ],
             )
 
-            with patch('os.getcwd', return_value=tmpdir):
-                result = await context_builder.build_project_context(
-                    diff_file, [], sample_pr_details
-                )
+            with patch("os.getcwd", return_value=tmpdir):
+                result = await context_builder.build_project_context(diff_file, [], sample_pr_details)
                 assert result is not None
 
     @pytest.mark.asyncio
@@ -1533,22 +1523,22 @@ class TestContextBuilderLocalFileFallback:
             file_info=FileInfo(path="nonexistent_file.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=2,
-                    target_start=1, target_length=2,
+                    source_start=1,
+                    source_length=2,
+                    target_start=1,
+                    target_length=2,
                     content="# Content",
                     header="@@ -1,2 +1,2 @@",
-                    lines=["+# Content"]
+                    lines=["+# Content"],
                 )
-            ]
+            ],
         )
 
-        result = await context_builder.build_project_context(
-            diff_file, [], sample_pr_details
-        )
+        result = await context_builder.build_project_context(diff_file, [], sample_pr_details)
         assert result is not None
 
 
-class TestContextBuilderFindFunctionCallers:
+class TestContextBuilderFindFunctionCallersAdditional:
     """Tests for _find_function_callers method."""
 
     @pytest.fixture
@@ -1560,21 +1550,21 @@ class TestContextBuilderFindFunctionCallers:
 
     def test_find_callers_with_python_functions(self, context_builder):
         """Test finding callers of Python functions."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a Python file that defines a function
             main_py = os.path.join(tmpdir, "main.py")
-            with open(main_py, 'w') as f:
+            with open(main_py, "w") as f:
                 f.write("def target_function():\n    pass\n")
 
             # Create another file that calls it
             caller_py = os.path.join(tmpdir, "caller.py")
-            with open(caller_py, 'w') as f:
+            with open(caller_py, "w") as f:
                 f.write("from main import target_function\n\ndef call_it():\n    target_function()\n")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 # Diff content that modifies target_function
                 diff_content = "+def target_function():\n+    pass"
                 result = context_builder._find_function_callers("main.py", diff_content)
@@ -1582,24 +1572,24 @@ class TestContextBuilderFindFunctionCallers:
 
     def test_find_callers_exceeding_limit(self, context_builder):
         """Test that callers are limited to 15."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create main file
             main_py = os.path.join(tmpdir, "main.py")
-            with open(main_py, 'w') as f:
+            with open(main_py, "w") as f:
                 f.write("def target_func():\n    pass\n")
 
             # Create many caller files
             for i in range(20):
                 caller_py = os.path.join(tmpdir, f"caller_{i}.py")
-                with open(caller_py, 'w') as f:
+                with open(caller_py, "w") as f:
                     lines = [f"# Line {j}\n" for j in range(10)]
                     lines.append("target_func()\n")
                     f.writelines(lines)
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 diff_content = "+def target_func():\n+    pass"
                 result = context_builder._find_function_callers("main.py", diff_content)
                 # Should be limited
@@ -1607,18 +1597,18 @@ class TestContextBuilderFindFunctionCallers:
 
     def test_find_callers_with_exception_in_file(self, context_builder):
         """Test handling exception when reading caller file."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             main_py = os.path.join(tmpdir, "main.py")
-            with open(main_py, 'w') as f:
+            with open(main_py, "w") as f:
                 f.write("def my_func():\n    pass\n")
 
             # Create a directory with same name as expected file (causes read error)
             os.makedirs(os.path.join(tmpdir, "caller.py"))
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 diff_content = "+def my_func():\n+    pass"
                 result = context_builder._find_function_callers("main.py", diff_content)
                 assert isinstance(result, list)
@@ -1636,23 +1626,18 @@ class TestContextBuilderPackageJsonParsing:
 
     def test_parse_package_json_scripts(self, context_builder):
         """Test parsing scripts from package.json."""
-        import tempfile
-        import os
         import json
+        import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             pkg_json = os.path.join(tmpdir, "package.json")
-            with open(pkg_json, 'w') as f:
-                json.dump({
-                    "name": "test-project",
-                    "scripts": {
-                        "test": "jest",
-                        "build": "webpack",
-                        "lint": "eslint ."
-                    }
-                }, f)
+            with open(pkg_json, "w") as f:
+                json.dump(
+                    {"name": "test-project", "scripts": {"test": "jest", "build": "webpack", "lint": "eslint ."}}, f
+                )
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._build_repo_mental_model()
                 assert isinstance(result, str)
                 # Should include scripts info
@@ -1661,15 +1646,15 @@ class TestContextBuilderPackageJsonParsing:
 
     def test_parse_invalid_package_json(self, context_builder):
         """Test handling invalid JSON in package.json."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             pkg_json = os.path.join(tmpdir, "package.json")
-            with open(pkg_json, 'w') as f:
+            with open(pkg_json, "w") as f:
                 f.write("{ invalid json content ")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 # Should not raise, just skip
                 result = context_builder._build_repo_mental_model()
                 assert isinstance(result, str)
@@ -1687,13 +1672,13 @@ class TestContextBuilderASTFormatAnnotation:
 
     def test_extract_signatures_with_complex_types(self, context_builder):
         """Test extracting signatures with complex type annotations."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             main_py = os.path.join(tmpdir, "typed.py")
-            with open(main_py, 'w') as f:
-                f.write('''
+            with open(main_py, "w") as f:
+                f.write("""
 from typing import List, Dict, Optional
 
 def complex_func(
@@ -1705,23 +1690,23 @@ def complex_func(
 class TypedClass:
     def method(self, value: "ForwardRef") -> None:
         pass
-''')
+""")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._extract_code_signatures(max_files=5)
                 assert isinstance(result, str)
 
     def test_extract_signatures_with_syntax_error(self, context_builder):
         """Test extracting signatures from file with syntax errors."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             bad_py = os.path.join(tmpdir, "broken.py")
-            with open(bad_py, 'w') as f:
+            with open(bad_py, "w") as f:
                 f.write("def broken(\n    # missing close paren\n")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 # Should not raise
                 result = context_builder._extract_code_signatures(max_files=5)
                 assert isinstance(result, str)
@@ -1739,12 +1724,12 @@ class TestContextBuilderGenericSignatures:
 
     def test_extract_go_signatures(self, context_builder):
         """Test extracting Go function signatures."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             main_go = os.path.join(tmpdir, "main.go")
-            with open(main_go, 'w') as f:
+            with open(main_go, "w") as f:
                 f.write("""
 package main
 
@@ -1752,18 +1737,18 @@ func processRequest() {}
 func handleResponse() {}
 """)
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._extract_code_signatures(max_files=5)
                 assert isinstance(result, str)
 
     def test_extract_java_signatures(self, context_builder):
         """Test extracting Java method signatures."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             main_java = os.path.join(tmpdir, "Main.java")
-            with open(main_java, 'w') as f:
+            with open(main_java, "w") as f:
                 f.write("""
 public class Main {
     public void processData(String input) {}
@@ -1771,18 +1756,18 @@ public class Main {
 }
 """)
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._extract_code_signatures(max_files=5)
                 assert isinstance(result, str)
 
     def test_extract_typescript_signatures(self, context_builder):
         """Test extracting TypeScript signatures."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             main_ts = os.path.join(tmpdir, "main.ts")
-            with open(main_ts, 'w') as f:
+            with open(main_ts, "w") as f:
                 f.write("""
 export function exportedFunc() {}
 const arrowFunc = (x: number) => x * 2;
@@ -1791,7 +1776,7 @@ class Service {
 }
 """)
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._extract_code_signatures(max_files=5)
                 assert isinstance(result, str)
 
@@ -1819,19 +1804,19 @@ class TestContextBuilderCalledFunctions:
 
     def test_find_called_functions_in_python(self, context_builder):
         """Test finding definitions of called functions."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create helper file with function definition
             helper_py = os.path.join(tmpdir, "helper.py")
-            with open(helper_py, 'w') as f:
+            with open(helper_py, "w") as f:
                 f.write("def helper_func():\n    '''Helper function.'''\n    return 42\n")
 
             # File content that calls helper_func
             file_content = "from helper import helper_func\n\ndef main():\n    result = helper_func()\n"
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._find_called_functions(file_content, "main.py")
                 assert isinstance(result, list)
 
@@ -1870,20 +1855,22 @@ class TestContextBuilderBuildProjectContextFull:
             file_info=FileInfo(path="src/main.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=5,
-                    target_start=1, target_length=7,
+                    source_start=1,
+                    source_length=5,
+                    target_start=1,
+                    target_length=7,
                     content="def main():\n    pass",
                     header="@@ -1,5 +1,7 @@",
-                    lines=["+def main():", "+    helper_func()"]
+                    lines=["+def main():", "+    helper_func()"],
                 )
-            ]
+            ],
         )
 
     @pytest.mark.asyncio
     async def test_build_project_context_with_callers(self, mock_github_client, sample_pr_details):
         """Test build_project_context includes function callers."""
-        import tempfile
         import os
+        import tempfile
 
         mock_parser = Mock()
         builder = ContextBuilder(mock_github_client, mock_parser)
@@ -1891,36 +1878,38 @@ class TestContextBuilderBuildProjectContextFull:
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create main.py
             main_py = os.path.join(tmpdir, "main.py")
-            with open(main_py, 'w') as f:
+            with open(main_py, "w") as f:
                 f.write("def target_function():\n    pass\n")
 
             # Create caller.py
             caller_py = os.path.join(tmpdir, "caller.py")
-            with open(caller_py, 'w') as f:
+            with open(caller_py, "w") as f:
                 f.write("from main import target_function\n\ndef use_it():\n    target_function()\n")
 
             diff_file = DiffFile(
                 file_info=FileInfo(path="main.py"),
                 hunks=[
                     HunkInfo(
-                        source_start=1, source_length=2,
-                        target_start=1, target_length=2,
+                        source_start=1,
+                        source_length=2,
+                        target_start=1,
+                        target_length=2,
                         content="def target_function():\n    pass",
                         header="@@ -1,2 +1,2 @@",
-                        lines=["+def target_function():", "+    pass"]
+                        lines=["+def target_function():", "+    pass"],
                     )
-                ]
+                ],
             )
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = await builder.build_project_context(diff_file, [], sample_pr_details)
                 assert isinstance(result, str)
 
     @pytest.mark.asyncio
     async def test_build_project_context_with_called_functions(self, sample_pr_details):
         """Test build_project_context includes called function definitions."""
-        import tempfile
         import os
+        import tempfile
 
         mock_client = Mock()
         mock_client.get_file_content = Mock(
@@ -1932,23 +1921,25 @@ class TestContextBuilderBuildProjectContextFull:
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create helper.py with function
             helper_py = os.path.join(tmpdir, "helper.py")
-            with open(helper_py, 'w') as f:
+            with open(helper_py, "w") as f:
                 f.write("def helper_func():\n    '''Does something.'''\n    return True\n")
 
             diff_file = DiffFile(
                 file_info=FileInfo(path="main.py"),
                 hunks=[
                     HunkInfo(
-                        source_start=1, source_length=4,
-                        target_start=1, target_length=4,
+                        source_start=1,
+                        source_length=4,
+                        target_start=1,
+                        target_length=4,
                         content="from helper import helper_func",
                         header="@@ -1,4 +1,4 @@",
-                        lines=[" from helper import helper_func", "+def main():", "+    helper_func()"]
+                        lines=[" from helper import helper_func", "+def main():", "+    helper_func()"],
                     )
-                ]
+                ],
             )
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = await builder.build_project_context(diff_file, [], sample_pr_details)
                 assert isinstance(result, str)
 
@@ -1964,17 +1955,19 @@ class TestContextBuilderBuildProjectContextFull:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=1,
-                    target_start=1, target_length=1,
+                    source_start=1,
+                    source_length=1,
+                    target_start=1,
+                    target_length=1,
                     content="def test(): pass",
                     header="@@ -1,1 +1,1 @@",
-                    lines=["+def test(): pass"]
+                    lines=["+def test(): pass"],
                 )
-            ]
+            ],
         )
 
         # Simulate exception during caller finding
-        with patch.object(builder, '_find_function_callers', side_effect=Exception("Test error")):
+        with patch.object(builder, "_find_function_callers", side_effect=Exception("Test error")):
             result = await builder.build_project_context(diff_file, [], sample_pr_details)
             assert isinstance(result, str)
 
@@ -1991,8 +1984,8 @@ class TestContextBuilderCIWorkflows:
 
     def test_build_mental_model_with_github_workflows(self, context_builder):
         """Test detecting GitHub workflow files."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create .github/workflows directory
@@ -2001,25 +1994,25 @@ class TestContextBuilderCIWorkflows:
 
             # Create workflow file
             ci_yaml = os.path.join(workflows_dir, "ci.yml")
-            with open(ci_yaml, 'w') as f:
+            with open(ci_yaml, "w") as f:
                 f.write("name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._build_repo_mental_model()
                 assert isinstance(result, str)
 
     def test_build_mental_model_with_gitlab_ci(self, context_builder):
         """Test detecting GitLab CI files."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create .gitlab-ci.yml
             gitlab_ci = os.path.join(tmpdir, ".gitlab-ci.yml")
-            with open(gitlab_ci, 'w') as f:
+            with open(gitlab_ci, "w") as f:
                 f.write("stages:\n  - test\n  - build\n")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._build_repo_mental_model()
                 assert isinstance(result, str)
 
@@ -2036,42 +2029,42 @@ class TestContextBuilderMaxFilesLimit:
 
     def test_extract_signatures_respects_max_files(self, context_builder):
         """Test that signature extraction respects max files limit."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create many Python files
             for i in range(50):
                 py_file = os.path.join(tmpdir, f"file_{i}.py")
-                with open(py_file, 'w') as f:
+                with open(py_file, "w") as f:
                     f.write(f"def func_{i}():\n    pass\n")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._extract_code_signatures(max_files=5)
                 assert isinstance(result, str)
                 # Should be limited and not process all 50 files
 
     def test_extract_signatures_skips_excluded_dirs(self, context_builder):
         """Test that signature extraction skips excluded directories."""
-        import tempfile
         import os
+        import tempfile
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create file in excluded directory
             node_modules = os.path.join(tmpdir, "node_modules")
             os.makedirs(node_modules)
             excluded_file = os.path.join(node_modules, "test.py")
-            with open(excluded_file, 'w') as f:
+            with open(excluded_file, "w") as f:
                 f.write("def excluded(): pass\n")
 
             # Create file in normal directory
             src_dir = os.path.join(tmpdir, "src")
             os.makedirs(src_dir)
             included_file = os.path.join(src_dir, "main.py")
-            with open(included_file, 'w') as f:
+            with open(included_file, "w") as f:
                 f.write("def included(): pass\n")
 
-            with patch('os.getcwd', return_value=tmpdir):
+            with patch("os.getcwd", return_value=tmpdir):
                 result = context_builder._extract_code_signatures(max_files=10)
                 assert isinstance(result, str)
                 # Should skip node_modules
@@ -2101,8 +2094,8 @@ class TestContextBuilderRelatedFilesAdvanced:
     @pytest.mark.asyncio
     async def test_detect_related_files_with_inheritance(self, mock_github_client, sample_pr_details):
         """Test detecting files with class inheritance."""
-        import tempfile
         import os
+        import tempfile
 
         mock_parser = Mock()
         builder = ContextBuilder(mock_github_client, mock_parser)
@@ -2110,37 +2103,41 @@ class TestContextBuilderRelatedFilesAdvanced:
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create base class file
             base_py = os.path.join(tmpdir, "base.py")
-            with open(base_py, 'w') as f:
+            with open(base_py, "w") as f:
                 f.write("class BaseHandler:\n    def handle(self): pass\n")
 
             # Create derived class file
             derived_py = os.path.join(tmpdir, "derived.py")
-            with open(derived_py, 'w') as f:
+            with open(derived_py, "w") as f:
                 f.write("from base import BaseHandler\n\nclass MyHandler(BaseHandler):\n    pass\n")
 
             diff_file = DiffFile(
                 file_info=FileInfo(path="base.py"),
                 hunks=[
                     HunkInfo(
-                        source_start=1, source_length=2,
-                        target_start=1, target_length=3,
+                        source_start=1,
+                        source_length=2,
+                        target_start=1,
+                        target_length=3,
                         content="class BaseHandler:\n    def handle(self): pass",
                         header="@@ -1,2 +1,3 @@",
-                        lines=[" class BaseHandler:", "+    def handle(self): pass"]
+                        lines=[" class BaseHandler:", "+    def handle(self): pass"],
                     )
-                ]
+                ],
             )
 
-            with patch('os.getcwd', return_value=tmpdir):
-                mock_github_client.get_file_content = Mock(return_value="class BaseHandler:\n    def handle(self): pass\n")
+            with patch("os.getcwd", return_value=tmpdir):
+                mock_github_client.get_file_content = Mock(
+                    return_value="class BaseHandler:\n    def handle(self): pass\n"
+                )
                 result = await builder.detect_related_files(diff_file, sample_pr_details)
                 assert isinstance(result, list)
 
     @pytest.mark.asyncio
     async def test_detect_related_files_with_type_references(self, mock_github_client, sample_pr_details):
         """Test detecting files with type references."""
-        import tempfile
         import os
+        import tempfile
 
         mock_parser = Mock()
         builder = ContextBuilder(mock_github_client, mock_parser)
@@ -2148,28 +2145,32 @@ class TestContextBuilderRelatedFilesAdvanced:
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create types file
             types_py = os.path.join(tmpdir, "types.py")
-            with open(types_py, 'w') as f:
+            with open(types_py, "w") as f:
                 f.write("class UserModel:\n    name: str\n    email: str\n")
 
             # Main file using types
             main_py = os.path.join(tmpdir, "main.py")
-            with open(main_py, 'w') as f:
+            with open(main_py, "w") as f:
                 f.write("from types import UserModel\n\ndef get_user() -> UserModel:\n    pass\n")
 
             diff_file = DiffFile(
                 file_info=FileInfo(path="main.py"),
                 hunks=[
                     HunkInfo(
-                        source_start=1, source_length=3,
-                        target_start=1, target_length=3,
+                        source_start=1,
+                        source_length=3,
+                        target_start=1,
+                        target_length=3,
                         content="from types import UserModel",
                         header="@@ -1,3 +1,3 @@",
-                        lines=[" from types import UserModel"]
+                        lines=[" from types import UserModel"],
                     )
-                ]
+                ],
             )
 
-            with patch('os.getcwd', return_value=tmpdir):
-                mock_github_client.get_file_content = Mock(return_value="from types import UserModel\n\ndef get_user() -> UserModel:\n    pass\n")
+            with patch("os.getcwd", return_value=tmpdir):
+                mock_github_client.get_file_content = Mock(
+                    return_value="from types import UserModel\n\ndef get_user() -> UserModel:\n    pass\n"
+                )
                 result = await builder.detect_related_files(diff_file, sample_pr_details)
                 assert isinstance(result, list)

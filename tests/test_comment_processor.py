@@ -2,17 +2,18 @@
 Comprehensive tests for gemini_reviewer/comment_processor.py
 """
 
-import pytest
 from unittest.mock import Mock
+
+import pytest
 
 from gemini_reviewer.comment_processor import CommentProcessor
 from gemini_reviewer.config import ReviewConfig
 from gemini_reviewer.models import (
-    ReviewComment,
+    AIResponse,
     DiffFile,
     FileInfo,
     HunkInfo,
-    AIResponse,
+    ReviewComment,
     ReviewPriority,
 )
 
@@ -130,9 +131,7 @@ class TestConvertToReviewComment:
             category="documentation",
         )
 
-        result = processor.convert_to_review_comment(
-            ai_response, sample_diff_file, sample_hunk, 0
-        )
+        result = processor.convert_to_review_comment(ai_response, sample_diff_file, sample_hunk, 0)
 
         assert result is not None
         assert isinstance(result, ReviewComment)
@@ -147,9 +146,7 @@ class TestConvertToReviewComment:
             priority=ReviewPriority.LOW,
         )
 
-        result = processor.convert_to_review_comment(
-            ai_response, sample_diff_file, sample_hunk, 0
-        )
+        result = processor.convert_to_review_comment(ai_response, sample_diff_file, sample_hunk, 0)
 
         assert result is None
 
@@ -161,9 +158,7 @@ class TestConvertToReviewComment:
             priority=ReviewPriority.LOW,
         )
 
-        result = processor.convert_to_review_comment(
-            ai_response, sample_diff_file, sample_hunk, 0
-        )
+        result = processor.convert_to_review_comment(ai_response, sample_diff_file, sample_hunk, 0)
 
         assert result is None
 
@@ -176,9 +171,7 @@ class TestConvertToReviewComment:
             fix_code='f"Hello {name}"',
         )
 
-        result = processor.convert_to_review_comment(
-            ai_response, sample_diff_file, sample_hunk, 0
-        )
+        result = processor.convert_to_review_comment(ai_response, sample_diff_file, sample_hunk, 0)
 
         assert result is not None
         assert "```" in result.body  # Code block for fix
@@ -192,9 +185,7 @@ class TestConvertToReviewComment:
             anchor_snippet="new line",  # This should match line 2
         )
 
-        result = processor.convert_to_review_comment(
-            ai_response, sample_diff_file, sample_hunk, 0
-        )
+        result = processor.convert_to_review_comment(ai_response, sample_diff_file, sample_hunk, 0)
 
         assert result is not None
 
@@ -207,9 +198,7 @@ class TestConvertToReviewComment:
             anchor_snippet="new line",  # But anchor is on line 2
         )
 
-        result = processor.convert_to_review_comment(
-            ai_response, sample_diff_file, sample_hunk, 0
-        )
+        processor.convert_to_review_comment(ai_response, sample_diff_file, sample_hunk, 0)
 
         # Should either realign or return valid result
         # The behavior depends on anchor matching logic
@@ -306,10 +295,7 @@ class TestApplyCommentLimits:
         """Test applying total comment limit."""
         processor = CommentProcessor(limited_config)
 
-        comments = [
-            ReviewComment("c", "f1.py", i, priority=ReviewPriority.LOW)
-            for i in range(10)
-        ]
+        comments = [ReviewComment("c", "f1.py", i, priority=ReviewPriority.LOW) for i in range(10)]
 
         result = processor.apply_comment_limits(comments)
 
@@ -319,10 +305,7 @@ class TestApplyCommentLimits:
         """Test applying per-file limit."""
         processor = CommentProcessor(limited_config)
 
-        comments = [
-            ReviewComment("c", "main.py", i, priority=ReviewPriority.LOW)
-            for i in range(5)
-        ]
+        comments = [ReviewComment("c", "main.py", i, priority=ReviewPriority.LOW) for i in range(5)]
 
         result = processor.apply_comment_limits(comments)
 
@@ -333,10 +316,7 @@ class TestApplyCommentLimits:
         """Test with no limits configured."""
         processor = CommentProcessor(unlimited_config)
 
-        comments = [
-            ReviewComment("c", "f.py", i, priority=ReviewPriority.LOW)
-            for i in range(20)
-        ]
+        comments = [ReviewComment("c", "f.py", i, priority=ReviewPriority.LOW) for i in range(20)]
 
         result = processor.apply_comment_limits(comments)
 
@@ -734,7 +714,7 @@ class TestConvertToReviewCommentAdvanced:
             priority=ReviewPriority.LOW,
         )
 
-        result = processor.convert_to_review_comment(ai_response, diff_file, hunk, 0)
+        processor.convert_to_review_comment(ai_response, diff_file, hunk, 0)
 
         # May adjust or be valid
         # Just ensure no crash
@@ -1034,13 +1014,15 @@ class TestConvertToReviewCommentAnchorMatching:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=3,
-                    target_start=1, target_length=3,
+                    source_start=1,
+                    source_length=3,
+                    target_start=1,
+                    target_length=3,
                     content="def foo():\n    pass",
                     header="@@ -1,3 +1,3 @@",
-                    lines=[" def foo():", "+    new_line", " pass"]
+                    lines=[" def foo():", "+    new_line", " pass"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()
@@ -1062,13 +1044,15 @@ class TestConvertToReviewCommentAnchorMatching:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=3,
-                    target_start=1, target_length=3,
+                    source_start=1,
+                    source_length=3,
+                    target_start=1,
+                    target_length=3,
                     content="def foo():\n    pass",
                     header="@@ -1,3 +1,3 @@",
-                    lines=[" def foo():", "+    unique_target", " pass"]
+                    lines=[" def foo():", "+    unique_target", " pass"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()
@@ -1090,13 +1074,15 @@ class TestConvertToReviewCommentAnchorMatching:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=4,
-                    target_start=1, target_length=5,
+                    source_start=1,
+                    source_length=4,
+                    target_start=1,
+                    target_length=5,
                     content="code",
                     header="@@ -1,4 +1,5 @@",
-                    lines=[" same_text", "-same_text", "+same_text", " other"]
+                    lines=[" same_text", "-same_text", "+same_text", " other"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()
@@ -1122,13 +1108,15 @@ class TestConvertToReviewCommentDeletionHandling:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=3,
-                    target_start=1, target_length=3,
+                    source_start=1,
+                    source_length=3,
+                    target_start=1,
+                    target_length=3,
                     content="code",
                     header="@@ -1,3 +1,3 @@",
-                    lines=["-deleted_line", "+added_line", " context"]
+                    lines=["-deleted_line", "+added_line", " context"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()
@@ -1150,13 +1138,15 @@ class TestConvertToReviewCommentDeletionHandling:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=2,
-                    target_start=1, target_length=1,
+                    source_start=1,
+                    source_length=2,
+                    target_start=1,
+                    target_length=1,
                     content="code",
                     header="@@ -1,2 +1,1 @@",
-                    lines=["-deleted_line", " context_line"]
+                    lines=["-deleted_line", " context_line"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()
@@ -1181,13 +1171,15 @@ class TestConvertToReviewCommentFixCode:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=2,
-                    target_start=1, target_length=2,
+                    source_start=1,
+                    source_length=2,
+                    target_start=1,
+                    target_length=2,
                     content="code",
                     header="@@ -1,2 +1,2 @@",
-                    lines=[" line1", "+line2"]
+                    lines=[" line1", "+line2"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()
@@ -1199,7 +1191,7 @@ class TestConvertToReviewCommentFixCode:
         result = processor.convert_to_review_comment(ai_response, diff_file, diff_file.hunks[0], 0)
         assert result is not None
         # Should include fix code in body
-        if hasattr(result, 'body'):
+        if hasattr(result, "body"):
             assert "fixed_line2" in result.body or isinstance(result.body, str)
 
     def test_convert_with_extension_language(self):
@@ -1211,13 +1203,15 @@ class TestConvertToReviewCommentFixCode:
             file_info=FileInfo(path="test.js"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=2,
-                    target_start=1, target_length=2,
+                    source_start=1,
+                    source_length=2,
+                    target_start=1,
+                    target_length=2,
                     content="code",
                     header="@@ -1,2 +1,2 @@",
-                    lines=[" line1", "+line2"]
+                    lines=[" line1", "+line2"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()
@@ -1283,13 +1277,15 @@ class TestInferAnchorFromComment:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=3,
-                    target_start=1, target_length=3,
+                    source_start=1,
+                    source_length=3,
+                    target_start=1,
+                    target_length=3,
                     content="code",
                     header="@@ -1,3 +1,3 @@",
-                    lines=[" def foo():", "+    target_func()", " pass"]
+                    lines=[" def foo():", "+    target_func()", " pass"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()
@@ -1311,13 +1307,15 @@ class TestInferAnchorFromComment:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=2,
-                    target_start=1, target_length=2,
+                    source_start=1,
+                    source_length=2,
+                    target_start=1,
+                    target_length=2,
                     content="code",
                     header="@@ -1,2 +1,2 @@",
-                    lines=[" x = 1", "+y = 2"]
+                    lines=[" x = 1", "+y = 2"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()
@@ -1343,13 +1341,15 @@ class TestLinePayloadHelper:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=3,
-                    target_start=1, target_length=3,
+                    source_start=1,
+                    source_length=3,
+                    target_start=1,
+                    target_length=3,
                     content="code",
                     header="@@ -1,3 +1,3 @@",
-                    lines=[" line1", "", "+line3"]
+                    lines=[" line1", "", "+line3"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()
@@ -1374,13 +1374,15 @@ class TestMultipleAnchorMatches:
             file_info=FileInfo(path="test.py"),
             hunks=[
                 HunkInfo(
-                    source_start=1, source_length=5,
-                    target_start=1, target_length=5,
+                    source_start=1,
+                    source_length=5,
+                    target_start=1,
+                    target_length=5,
                     content="code",
                     header="@@ -1,5 +1,5 @@",
-                    lines=[" target", " other", " target", " more", " target"]
+                    lines=[" target", " other", " target", " more", " target"],
                 )
-            ]
+            ],
         )
 
         ai_response = Mock()

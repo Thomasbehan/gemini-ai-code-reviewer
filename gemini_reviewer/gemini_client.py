@@ -7,43 +7,45 @@ prompt engineering, response validation, and error handling.
 
 import json
 import logging
-import time
 import re
-from typing import List, Dict, Any, Optional
+from typing import Any, Optional
+
 import google.generativeai as genai
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from .config import GeminiConfig, ReviewConfig, ReviewMode
-from .models import AIResponse, ReviewPriority, AnalysisContext, HunkInfo, PRDetails
-from .utils import get_file_language, sanitize_text, sanitize_code_content
-
+from .config import GeminiConfig, ReviewConfig
+from .models import AIResponse, AnalysisContext, HunkInfo, ReviewPriority
+from .utils import get_file_language, sanitize_code_content, sanitize_text
 
 logger = logging.getLogger(__name__)
 
 
 class GeminiClientError(Exception):
     """Base exception for Gemini client errors."""
+
     pass
 
 
 class ModelNotAvailableError(GeminiClientError):
     """Exception raised when the specified model is not available."""
+
     pass
 
 
 class TokenLimitExceededError(GeminiClientError):
     """Exception raised when token limit is exceeded."""
+
     pass
 
 
 class GeminiClient:
     """Gemini AI client with retry logic and comprehensive error handling."""
-    
-    def __init__(self, config: GeminiConfig, review_config: Optional['ReviewConfig'] = None):
+
+    def __init__(self, config: GeminiConfig, review_config: Optional["ReviewConfig"] = None):
         """Initialize Gemini client with configuration."""
         self.config = config
         self.review_config = review_config
-        
+
         try:
             genai.configure(api_key=config.api_key)
             self._model = genai.GenerativeModel(config.model_name)
@@ -51,7 +53,7 @@ class GeminiClient:
         except Exception as e:
             logger.error(f"Failed to initialize Gemini client: {str(e)}")
             raise GeminiClientError(f"Failed to initialize Gemini client: {str(e)}")
-        
+
         self._generation_config = {
             "max_output_tokens": config.max_output_tokens,
             "temperature": config.temperature,
@@ -59,35 +61,30 @@ class GeminiClient:
             # Force the model to emit JSON only, reducing chances of conversational wrappers
             "response_mime_type": "application/json",
         }
-        
+
         # Statistics tracking
         self._total_requests = 0
         self._successful_requests = 0
         self._failed_requests = 0
         self._total_tokens_used = 0
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=4, max=60),
-        retry=retry_if_exception_type((Exception,))
+        retry=retry_if_exception_type((Exception,)),
     )
-    def analyze_code_hunk(
-        self,
-        hunk: HunkInfo,
-        context: AnalysisContext,
-        prompt_template: str
-    ) -> List[AIResponse]:
+    def analyze_code_hunk(self, hunk: HunkInfo, context: AnalysisContext, prompt_template: str) -> list[AIResponse]:
         """Analyze a code hunk and return AI responses with retry logic."""
         self._total_requests += 1
-        
+
         if not hunk or not hunk.content:
             logger.warning("Empty hunk provided for analysis")
             return []
-        
+
         if not context or not context.pr_details:
             logger.warning("Invalid analysis context provided")
             return []
-        
+
         try:
             prompt = self._create_analysis_prompt(hunk, context, prompt_template)
 
@@ -95,53 +92,111 @@ class GeminiClient:
                 # Truncate full_file_content first (largest contributor) to preserve diff and instructions
                 overshoot = len(prompt) - self.config.max_prompt_length
                 if context.full_file_content and len(context.full_file_content) > overshoot + 500:
-                    truncated_file = context.full_file_content[:len(context.full_file_content) - overshoot - 200]
+                    truncated_file = context.full_file_content[: len(context.full_file_content) - overshoot - 200]
                     truncated_file += "\n... (truncated to fit prompt limit)"
                     context.full_file_content = truncated_file
                     prompt = self._create_analysis_prompt(hunk, context, prompt_template)
                     logger.warning(f"Truncated full_file_content to fit prompt limit ({len(prompt)} chars)")
                 else:
                     logger.warning(f"Prompt too long ({len(prompt)} chars), hard-truncating...")
-                    prompt = prompt[:self.config.max_prompt_length] + "...[truncated]"
-            
+                    prompt = prompt[: self.config.max_prompt_length] + "...[truncated]"
+
             logger.debug(f"Analyzing hunk with {len(hunk.content)} characters of content")
             logger.debug(f"Prompt preview: {prompt[:200]}...")
-            
+
             response = self._generate_content_with_validation(prompt)
             ai_responses = self._parse_ai_response(response)
-            
+
             self._successful_requests += 1
             logger.info(f"Generated {len(ai_responses)} AI responses for hunk")
-            
+
             return ai_responses
-            
+
         except Exception as e:
             self._failed_requests += 1
             logger.error(f"Error analyzing code hunk: {str(e)}")
             raise
-    
+
+    def verify_findings(self, diff_text: str, findings: list[str]) -> list[int]:
+        """Adversarial second pass: given a file's diff and the candidate findings,
+        return the 1-based indices of the findings that survive verification.
+
+        Fails OPEN (keeps all findings) on any error, so a verifier hiccup never
+        silently drops real review comments.
+        """
+        from .prompts import get_verify_prompt
+
+        if not findings:
+            return []
+        all_indices = list(range(1, len(findings) + 1))
+        if not diff_text:
+            return all_indices
+        try:
+            numbered = "\n".join(f"{i}. {f}" for i, f in enumerate(findings, 1))
+            prompt = get_verify_prompt(diff_text, numbered)
+            if len(prompt) > self.config.max_prompt_length:
+                prompt = prompt[: self.config.max_prompt_length] + "\n...[truncated]"
+            response = self._generate_content_with_validation(prompt)
+            cleaned = self._clean_response_text(response)
+            data = json.loads(cleaned)
+            keep = data.get("keep", all_indices)
+            if not isinstance(keep, list):
+                return all_indices
+            kept = [int(i) for i in keep if isinstance(i, (int, float, str)) and str(i).strip().lstrip("-").isdigit()]
+            kept = [i for i in kept if 1 <= i <= len(findings)]
+            notes = data.get("notes", "")
+            logger.info(f"Verify pass kept {len(kept)}/{len(findings)} findings. {notes}")
+            return kept if kept or "keep" in data else all_indices
+        except Exception as e:
+            logger.warning(f"Verify pass failed ({e}); keeping all {len(findings)} findings (fail-open)")
+            return all_indices
+
+    def respond_to_reply(self, original_comment: str, code_context: str, thread: str) -> dict[str, Any]:
+        """Generate a reply to a human's response on one of the bot's review threads.
+
+        Returns {"reply": str, "resolved": bool}. Returns an empty reply on failure
+        so the caller can choose to stay silent rather than post noise.
+        """
+        from .prompts import get_reply_prompt
+
+        try:
+            prompt = get_reply_prompt(original_comment, code_context, thread)
+            if len(prompt) > self.config.max_prompt_length:
+                prompt = prompt[: self.config.max_prompt_length] + "\n...[truncated]"
+            response = self._generate_content_with_validation(prompt)
+            cleaned = self._clean_response_text(response)
+            data = json.loads(cleaned)
+            reply = str(data.get("reply", "")).strip()
+            resolved = bool(data.get("resolved", False))
+            return {"reply": reply, "resolved": resolved}
+        except Exception as e:
+            logger.warning(f"Failed to generate reply to review thread: {e}")
+            return {"reply": "", "resolved": False}
+
     def _generate_content_with_validation(self, prompt: str) -> str:
         """Generate content with validation and error handling."""
         logger.info("Sending request to Gemini API...")
-        
+
         try:
             response = self._model.generate_content(prompt, generation_config=self._generation_config)
-            
+
             if not response:
                 raise GeminiClientError("Empty response from Gemini API")
-            
+
             # Check if response has valid parts before accessing text
             # finish_reason values: 1=STOP (normal), 2=MAX_TOKENS, 3=SAFETY, 4=RECITATION, 5=OTHER
-            if hasattr(response, 'candidates') and response.candidates:
+            if hasattr(response, "candidates") and response.candidates:
                 candidate = response.candidates[0]
-                finish_reason = getattr(candidate, 'finish_reason', None)
-                
+                finish_reason = getattr(candidate, "finish_reason", None)
+
                 # If content was filtered (safety/recitation), return empty result with warning
                 if finish_reason in [3, 4]:  # SAFETY or RECITATION
                     reason_name = "SAFETY" if finish_reason == 3 else "RECITATION"
-                    logger.warning(f"Gemini API response filtered due to {reason_name} settings (finish_reason={finish_reason}). "
-                                 "This is expected for some code patterns and does not indicate an error. "
-                                 "Returning empty review for this hunk.")
+                    logger.warning(
+                        f"Gemini API response filtered due to {reason_name} settings (finish_reason={finish_reason}). "
+                        "This is expected for some code patterns and does not indicate an error. "
+                        "Returning empty review for this hunk."
+                    )
                     return "[]"
 
                 # If response was truncated (MAX_TOKENS), log warning but let partial text through
@@ -150,42 +205,46 @@ class GeminiClient:
                     logger.warning("Response truncated due to max_output_tokens limit — attempting partial parse")
 
                 # Check if there are valid parts in the response
-                if not hasattr(candidate, 'content') or not candidate.content or not candidate.content.parts:
-                    logger.warning(f"Response has no valid parts (finish_reason={finish_reason}). Returning empty review.")
+                if not hasattr(candidate, "content") or not candidate.content or not candidate.content.parts:
+                    logger.warning(
+                        f"Response has no valid parts (finish_reason={finish_reason}). Returning empty review."
+                    )
                     return "[]"
-            
+
             # Try to access the text - this may still fail for other reasons
-            if not hasattr(response, 'text'):
+            if not hasattr(response, "text"):
                 logger.warning("Response object has no text attribute. Returning empty review.")
                 return "[]"
-            
+
             response_text = response.text.strip()
             if not response_text:
                 logger.warning("Empty response text from Gemini API. Returning empty review.")
                 return "[]"
-            
+
             logger.debug(f"Received response (length: {len(response_text)})")
-            
+
             # Track token usage if available
-            if hasattr(response, 'usage_metadata'):
+            if hasattr(response, "usage_metadata"):
                 try:
                     tokens_used = response.usage_metadata.total_token_count
                     self._total_tokens_used += tokens_used
                     logger.debug(f"Tokens used: {tokens_used}")
                 except (AttributeError, TypeError) as e:
                     logger.debug(f"Token counting unavailable: {e}")
-            
+
             return response_text
-            
+
         except Exception as e:
             error_msg = str(e).lower()
-            
+
             # Check if this is the specific "response.text requires valid Part" error
             if "response.text" in error_msg and "valid" in error_msg and "part" in error_msg:
-                logger.warning(f"Response filtered by Gemini API (likely safety/content policy). "
-                             "This is expected for some code patterns. Returning empty review for this hunk.")
+                logger.warning(
+                    "Response filtered by Gemini API (likely safety/content policy). "
+                    "This is expected for some code patterns. Returning empty review for this hunk."
+                )
                 return "[]"
-            
+
             if "quota" in error_msg or "rate limit" in error_msg:
                 logger.warning("Gemini API rate limit or quota exceeded")
                 raise GeminiClientError("API rate limit exceeded")
@@ -196,13 +255,8 @@ class GeminiClient:
             else:
                 logger.error(f"Gemini API error: {str(e)}")
                 raise GeminiClientError(f"Gemini API error: {str(e)}")
-    
-    def _create_analysis_prompt(
-        self,
-        hunk: HunkInfo,
-        context: AnalysisContext,
-        prompt_template: str
-    ) -> str:
+
+    def _create_analysis_prompt(self, hunk: HunkInfo, context: AnalysisContext, prompt_template: str) -> str:
         """Create a comprehensive analysis prompt with project context."""
         # Sanitize inputs
         sanitized_content = sanitize_code_content(hunk.content)
@@ -215,7 +269,7 @@ class GeminiClient:
             context_info.append(f"File: {context.file_info.path}")
             if context.file_info.file_extension:
                 language = get_file_language(context.file_info.path)
-                if language and language != 'unknown':
+                if language and language != "unknown":
                     context_info.append(f"Language: {language}")
 
         if context.is_test_file:
@@ -247,77 +301,74 @@ class GeminiClient:
             "---",
             sanitized_description,
             "---",
-            ""
+            "",
         ]
 
         if context_string:
-            prompt_parts.extend([
-                "File Context:",
-                context_string,
-                ""
-            ])
+            prompt_parts.extend(["File Context:", context_string, ""])
 
         # Add cross-file change summary if available
         if context.change_summary:
-            prompt_parts.extend([
-                "Other Files Changed in This PR:",
-                "---",
-                context.change_summary,
-                "---",
-                "",
-                "Consider how this hunk relates to changes in other files.",
-                "Look for coordinated refactoring that spans multiple files.",
-                ""
-            ])
+            prompt_parts.extend(
+                [
+                    "Other Files Changed in This PR:",
+                    "---",
+                    context.change_summary,
+                    "---",
+                    "",
+                    "Consider how this hunk relates to changes in other files.",
+                    "Look for coordinated refactoring that spans multiple files.",
+                    "",
+                ]
+            )
 
         # Add full file content for better understanding of context
         if context.full_file_content:
             # Truncate if too long, but include key parts
             full_content = context.full_file_content
-            max_file_content = (self.review_config.max_context_chars if self.review_config else 12000)
+            max_file_content = self.review_config.max_context_chars if self.review_config else 12000
             if len(full_content) > max_file_content:
                 # Include beginning (imports, class definitions) and truncate middle
                 full_content = full_content[:max_file_content] + "\n... (truncated, full file is larger)"
 
-            prompt_parts.extend([
-                "Full File Content (REFERENCE ONLY — do NOT review this, only use it for context):",
-                "```",
-                full_content,
-                "```",
-                "",
-                "The full file content is provided ONLY so you can understand:",
-                "- What imports are available at the top of the file",
-                "- What class/function the changed code belongs to",
-                "- The overall structure and patterns used in this file",
-                "Do NOT report issues found only in the full file content. Your review",
-                "scope is STRICTLY the diff hunk below — only comment on changed lines.",
-                ""
-            ])
+            prompt_parts.extend(
+                [
+                    "Full File Content (REFERENCE ONLY — do NOT review this, only use it for context):",
+                    "```",
+                    full_content,
+                    "```",
+                    "",
+                    "The full file content is provided ONLY so you can understand:",
+                    "- What imports are available at the top of the file",
+                    "- What class/function the changed code belongs to",
+                    "- The overall structure and patterns used in this file",
+                    "Do NOT report issues found only in the full file content. Your review",
+                    "scope is STRICTLY the diff hunk below — only comment on changed lines.",
+                    "",
+                ]
+            )
 
         # Add project context if available (related file contents)
         if context.project_context:
-            prompt_parts.extend([
-                "Project Context (Related Files — REFERENCE ONLY):",
-                "---",
-                context.project_context,
-                "---",
-                "",
-                "Use the above related files to understand how changed code fits into the project.",
-                "Only flag issues where the CHANGED lines ('+' lines in the diff) violate these patterns.",
-                "Do NOT report issues in the related files themselves.",
-                ""
-            ])
+            prompt_parts.extend(
+                [
+                    "Project Context (Related Files — REFERENCE ONLY):",
+                    "---",
+                    context.project_context,
+                    "---",
+                    "",
+                    "Use the above related files to understand how changed code fits into the project.",
+                    "Only flag issues where the CHANGED lines ('+' lines in the diff) violate these patterns.",
+                    "Do NOT report issues in the related files themselves.",
+                    "",
+                ]
+            )
 
-        prompt_parts.extend([
-            "Git diff to review:",
-            "```diff",
-            sanitized_content,
-            "```"
-        ])
+        prompt_parts.extend(["Git diff to review:", "```diff", sanitized_content, "```"])
 
         return "\n".join(prompt_parts)
-    
-    def _parse_ai_response(self, response_text: str) -> List[AIResponse]:
+
+    def _parse_ai_response(self, response_text: str) -> list[AIResponse]:
         """Parse AI response and validate the structure.
         Accepts both object-with-'reviews' and top-level list schemas.
         """
@@ -325,30 +376,30 @@ class GeminiClient:
             # Log raw response details for debugging
             logger.debug(f"Raw response length: {len(response_text)} characters")
             logger.debug(f"Raw response preview: {response_text[:200]}...")
-            
+
             # Check if response is empty or whitespace-only
             if not response_text or not response_text.strip():
                 logger.error("Received empty or whitespace-only response from Gemini API")
                 logger.debug(f"Raw response repr: {repr(response_text[:100])}")
                 return []
-            
+
             # Clean the response text
             cleaned_response = self._clean_response_text(response_text)
             logger.debug(f"Cleaned response length: {len(cleaned_response)} characters")
             logger.debug(f"Cleaned response preview: {cleaned_response[:200]}...")
-            
+
             # Validate cleaned response is not empty
             if not cleaned_response or not cleaned_response.strip():
                 logger.error("Cleaned response is empty after removing markdown formatting")
                 logger.error(f"Raw response was: {response_text[:500]}...")
                 return []
-            
+
             # Parse JSON (can be dict or list)
             data = json.loads(cleaned_response)
             logger.debug("Successfully parsed JSON response from Gemini")
-            
-            reviews_list: Optional[List[Dict[str, Any]]] = None
-            
+
+            reviews_list: list[dict[str, Any]] | None = None
+
             if isinstance(data, dict):
                 # Standard path
                 if "reviews" in data and isinstance(data["reviews"], list):
@@ -363,7 +414,9 @@ class GeminiClient:
                             break
                     # If still none, maybe the object itself represents a single review item
                     if reviews_list is None:
-                        logger.warning("Response JSON object lacks 'reviews' (or alternates); attempting single-item parse")
+                        logger.warning(
+                            "Response JSON object lacks 'reviews' (or alternates); attempting single-item parse"
+                        )
                         reviews_list = [data]
             elif isinstance(data, list):
                 logger.info("Parsed reviews from top-level JSON array")
@@ -371,26 +424,28 @@ class GeminiClient:
             else:
                 logger.warning(f"Unexpected JSON root type: {type(data)}")
                 return []
-            
+
             if not reviews_list:
                 logger.warning("No review items found after schema normalization")
                 return []
-            
+
             # Convert to AIResponse objects
-            ai_responses: List[AIResponse] = []
+            ai_responses: list[AIResponse] = []
             for review in reviews_list:
                 ai_response = self._parse_single_review(review)
                 if ai_response:
                     ai_responses.append(ai_response)
-            
+
             logger.info(f"Successfully parsed {len(ai_responses)} AI responses")
             return ai_responses
-            
+
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON response: {str(e)}")
             logger.error(f"Raw response length: {len(response_text)}")
             logger.error(f"Raw response preview: {response_text[:500]}...")
-            logger.error(f"Cleaned response preview: {cleaned_response[:500] if 'cleaned_response' in locals() else 'N/A'}...")
+            logger.error(
+                f"Cleaned response preview: {cleaned_response[:500] if 'cleaned_response' in locals() else 'N/A'}..."
+            )
 
             # Fallback: try to extract a valid JSON object or array from the raw response
             fallback_json_text = self._extract_valid_json_segment(response_text)
@@ -399,7 +454,7 @@ class GeminiClient:
                     data = json.loads(fallback_json_text)
                     logger.info("Recovered by extracting a valid JSON segment from the response")
 
-                    reviews_list: Optional[List[Dict[str, Any]]] = None
+                    reviews_list: list[dict[str, Any]] | None = None
                     if isinstance(data, dict):
                         if "reviews" in data and isinstance(data["reviews"], list):
                             reviews_list = data["reviews"]
@@ -416,7 +471,7 @@ class GeminiClient:
                     else:
                         return []
 
-                    ai_responses: List[AIResponse] = []
+                    ai_responses: list[AIResponse] = []
                     for review in reviews_list:
                         ai_response = self._parse_single_review(review)
                         if ai_response:
@@ -432,8 +487,8 @@ class GeminiClient:
             logger.error(f"Error parsing AI response: {str(e)}")
             logger.debug(f"Raw response: {response_text[:1000]}...")
             return []
-    
-    def _parse_single_review(self, review: Dict[str, Any]) -> Optional[AIResponse]:
+
+    def _parse_single_review(self, review: dict[str, Any]) -> AIResponse | None:
         """Parse a single review from the AI response.
         Accepts multiple field name variants from different response schemas.
         """
@@ -441,12 +496,10 @@ class GeminiClient:
             if not isinstance(review, dict):
                 logger.warning(f"Invalid review format: {type(review)}")
                 return None
-            
+
             # Normalize line number field
-            line_keys = [
-                "lineNumber", "line", "ln", "line_no", "lineIndex", "position", "pos"
-            ]
-            line_number: Optional[int] = None
+            line_keys = ["lineNumber", "line", "ln", "line_no", "lineIndex", "position", "pos"]
+            line_number: int | None = None
             for k in line_keys:
                 if k in review:
                     try:
@@ -457,14 +510,23 @@ class GeminiClient:
                     except (ValueError, TypeError):
                         continue
             if not line_number or line_number <= 0:
-                logger.warning(f"Review missing or invalid line number field: keys tried {line_keys}; review keys: {list(review.keys())}")
+                logger.warning(
+                    f"Review missing or invalid line number field: keys tried {line_keys}; review keys: {list(review.keys())}"
+                )
                 return None
-            
+
             # Normalize comment/message field
             comment_keys = [
-                "explanation", "reviewComment", "comment", "message", "finding", "text", "body", "description"
+                "explanation",
+                "reviewComment",
+                "comment",
+                "message",
+                "finding",
+                "text",
+                "body",
+                "description",
             ]
-            comment: Optional[str] = None
+            comment: str | None = None
             for k in comment_keys:
                 if k in review and review[k] is not None:
                     comment = str(review[k])
@@ -473,7 +535,7 @@ class GeminiClient:
                 logger.warning("Empty review comment after normalization")
                 return None
             comment = sanitize_text(comment)
-            
+
             # Extract fix code
             fix_code = None
             for k in ["fixCode", "fix", "suggestion", "codeBlock"]:
@@ -487,12 +549,13 @@ class GeminiClient:
                 if k in review and isinstance(review[k], str) and review[k].strip():
                     anchor_snippet = review[k].strip()
                     break
-            
+
             # If not provided explicitly, try to infer from first inline code span using backticks
-            if not anchor_snippet and '`' in comment:
+            if not anchor_snippet and "`" in comment:
                 try:
                     # Prefer shortest inline code span (single backticks) to reduce false matches
                     import re as _re
+
                     inline_matches = list(_re.finditer(r"`([^`\n]+)`", comment))
                     if inline_matches:
                         # pick the first non-trivial snippet
@@ -505,12 +568,12 @@ class GeminiClient:
                             anchor_snippet = inline_matches[0].group(1).strip()
                 except Exception:
                     pass
-            
+
             # Require actionable fix: keep only comments that include some code indication
             # if not anchor_snippet and '`' not in comment:
             #    logger.info("Discarding non-actionable review (no code snippet/anchor provided)")
             #    return None
-            
+
             # Optional: priority/severity/level
             priority_val = None
             for k in ["priority", "severity", "level", "rating"]:
@@ -518,7 +581,7 @@ class GeminiClient:
                     priority_val = review[k]
                     break
             priority = self._parse_priority(priority_val)
-            
+
             # Optional: category/tag/label/type
             category_val = None
             for k in ["category", "tag", "label", "type", "area"]:
@@ -526,7 +589,7 @@ class GeminiClient:
                     category_val = review[k]
                     break
             category = category_val
-            
+
             # Optional: confidence/score/probability
             confidence_val = None
             for k in ["confidence", "score", "probability", "likelihood"]:
@@ -534,7 +597,7 @@ class GeminiClient:
                     confidence_val = review[k]
                     break
             confidence = self._parse_confidence(confidence_val)
-            
+
             # Handle percentage-like confidences (>1.0 up to 100)
             if confidence is None and confidence_val is not None:
                 try:
@@ -543,7 +606,7 @@ class GeminiClient:
                         confidence = max(0.0, min(1.0, c / 100.0))
                 except (ValueError, TypeError):
                     pass
-            
+
             return AIResponse(
                 line_number=line_number,
                 review_comment=comment,
@@ -551,45 +614,40 @@ class GeminiClient:
                 category=category,
                 confidence=confidence,
                 anchor_snippet=anchor_snippet,
-                fix_code=fix_code
+                fix_code=fix_code,
             )
-            
+
         except Exception as e:
             logger.warning(f"Error parsing single review: {str(e)}")
             return None
-    
+
     def _clean_response_text(self, response_text: str) -> str:
         """Clean the response text from common formatting issues and extract JSON or JSON array.
-        
+
         This method handles cases where the AI adds conversational text before/after the JSON,
         despite instructions to output only JSON. It searches for and extracts the JSON object or array.
         """
         cleaned = response_text.strip()
-        
+
         # First, try to remove markdown code block markers if present
-        if '```' in cleaned:
+        if "```" in cleaned:
             # Remove opening markdown block
-            if cleaned.startswith('```json'):
+            if cleaned.startswith("```json") or cleaned.startswith("```JSON"):
                 cleaned = cleaned[7:].lstrip()
-            elif cleaned.startswith('```JSON'):
-                cleaned = cleaned[7:].lstrip()
-            elif cleaned.startswith('```\n'):
+            elif cleaned.startswith("```\n"):
                 cleaned = cleaned[4:]
-            elif cleaned.startswith('```'):
-                first_newline = cleaned.find('\n')
-                if first_newline != -1:
-                    cleaned = cleaned[first_newline + 1:]
-                else:
-                    cleaned = cleaned[3:].lstrip()
-            
+            elif cleaned.startswith("```"):
+                first_newline = cleaned.find("\n")
+                cleaned = cleaned[first_newline + 1 :] if first_newline != -1 else cleaned[3:].lstrip()
+
             # Remove closing ``` markers
-            if cleaned.endswith('```'):
+            if cleaned.endswith("```"):
                 cleaned = cleaned[:-3].rstrip()
-        
+
         # Find the earliest JSON start either object '{' or array '['
-        obj_start = cleaned.find('{')
-        arr_start = cleaned.find('[')
-        
+        obj_start = cleaned.find("{")
+        arr_start = cleaned.find("[")
+
         # Determine which JSON construct appears first
         start_idx = -1
         if arr_start != -1 and (obj_start == -1 or arr_start < obj_start):
@@ -599,32 +657,32 @@ class GeminiClient:
         else:
             logger.warning("No JSON object or array start found in response")
             return cleaned
-        
+
         # Use JSONDecoder to robustly find the end of the JSON object
         try:
             # raw_decode parses from the start and returns (obj, end_index)
             _, end_offset = json.JSONDecoder().raw_decode(cleaned[start_idx:])
             end_idx = start_idx + end_offset
-            
+
             # Log if we had to strip conversational text
             if start_idx > 0:
                 stripped_prefix = cleaned[:start_idx].strip()
                 if stripped_prefix:
                     logger.info(f"Stripped conversational prefix from response: {stripped_prefix[:100]}...")
-            
+
             if end_idx < len(cleaned):
                 stripped_suffix = cleaned[end_idx:].strip()
                 if stripped_suffix:
                     logger.info(f"Stripped conversational suffix from response: {stripped_suffix[:100]}...")
-            
+
             return cleaned[start_idx:end_idx]
-            
+
         except json.JSONDecodeError:
             logger.warning("Failed to decode JSON segment using raw_decode, falling back to heuristic extraction")
             # Return the substring from start_idx so fallback methods can try to handle it
             return cleaned[start_idx:]
 
-    def _extract_valid_json_segment(self, text: str) -> Optional[str]:
+    def _extract_valid_json_segment(self, text: str) -> str | None:
         """Attempt to extract a valid JSON object or array that contains reviews from free-form text.
         Strategy:
         1) Prefer fenced ```json code blocks (object or array)
@@ -644,10 +702,9 @@ class GeminiClient:
                 candidate = m.group(1).strip()
                 try:
                     data = json.loads(candidate)
-                    if isinstance(data, list) and data:
-                        if isinstance(data[0], dict):
-                            logger.info("Using JSON array extracted from ```json fenced block")
-                            return candidate
+                    if isinstance(data, list) and data and isinstance(data[0], dict):
+                        logger.info("Using JSON array extracted from ```json fenced block")
+                        return candidate
                     if isinstance(data, dict):
                         logger.info("Using JSON object extracted from ```json fenced block")
                         return candidate
@@ -664,13 +721,13 @@ class GeminiClient:
         # Prefer arrays first, then objects
         candidates.extend(arr_segments or [])
         candidates.extend(obj_segments or [])
-        
+
         if candidates:
             # Sort candidates: prefer those containing 'reviews' or review-like keys, then longer
             def looks_reviewish(seg: str) -> bool:
-                keywords = ["\"reviews\"", "\"line\"", "\"lineNumber\"", "\"comment\"", "\"message\""]
+                keywords = ['"reviews"', '"line"', '"lineNumber"', '"comment"', '"message"']
                 return any(k in seg for k in keywords)
-            
+
             candidates.sort(key=lambda s: (not looks_reviewish(s), -len(s)))
 
             for seg in candidates:
@@ -689,12 +746,12 @@ class GeminiClient:
         # If we reached here, it means we couldn't parse a complete valid JSON structure.
         # This often happens if the response was truncated (max tokens).
         logger.info("No valid JSON found by standard methods, attempting to recover from truncated response...")
-        
+
         # First try to recover complete objects from the list
         recovered = self._recover_json_list_from_objects(raw)
         if recovered:
-             logger.info("Successfully recovered JSON list from truncated response")
-             return recovered
+            logger.info("Successfully recovered JSON list from truncated response")
+            return recovered
 
         # 4) Fallback: Try to repair the truncated JSON string directly
         # This handles the case where the last object itself is truncated
@@ -711,18 +768,18 @@ class GeminiClient:
 
         return None
 
-    def _extract_json_objects(self, text: str) -> List[str]:
+    def _extract_json_objects(self, text: str) -> list[str]:
         """Find valid JSON objects in text, handling nested braces and strings correctly."""
         objects = []
         stack = []
         in_string = False
         escape = False
-        
+
         for i, char in enumerate(text):
             if escape:
                 escape = False
                 continue
-            if char == '\\':
+            if char == "\\":
                 escape = True
                 continue
             if char == '"':
@@ -730,27 +787,26 @@ class GeminiClient:
                 continue
             if in_string:
                 continue
-                
-            if char == '{':
+
+            if char == "{":
                 stack.append(i)
-            elif char == '}':
-                if stack:
-                    start = stack.pop()
-                    if not stack: # Top level object closed
-                        objects.append(text[start:i+1])
+            elif char == "}" and stack:
+                start = stack.pop()
+                if not stack:  # Top level object closed
+                    objects.append(text[start : i + 1])
         return objects
 
-    def _recover_json_list_from_objects(self, text: str) -> Optional[str]:
+    def _recover_json_list_from_objects(self, text: str) -> str | None:
         """Attempt to recover a list of review objects from text that might be a truncated JSON array."""
         objects = self._extract_json_objects(text)
         if not objects:
             return None
-            
+
         # Filter objects that look like reviews
         valid_reviews = []
         # Keywords common in Review object
         keywords = ['"reviewComment"', '"lineNumber"', '"priority"', '"category"']
-        
+
         for obj_str in objects:
             # Check if it parses as valid JSON
             try:
@@ -761,10 +817,10 @@ class GeminiClient:
                     valid_reviews.append(obj_str)
             except Exception:
                 continue
-        
+
         if not valid_reviews:
             return None
-            
+
         # Construct a new JSON array
         return "[" + ",".join(valid_reviews) + "]"
 
@@ -773,143 +829,142 @@ class GeminiClient:
         stack = []
         in_string = False
         escape = False
-        
+
         for char in text:
             if in_string:
                 if escape:
                     escape = False
-                elif char == '\\':
+                elif char == "\\":
                     escape = True
                 elif char == '"':
                     in_string = False
                 continue
-            
+
             # Not in string
             if char == '"':
                 in_string = True
-            elif char == '{':
-                stack.append('}')
-            elif char == '[':
-                stack.append(']')
-            elif char == '}' or char == ']':
-                if stack:
-                    # Ideally the character should match stack[-1]
-                    # If not, the JSON is likely malformed, but we proceed
-                    if stack[-1] == char:
-                        stack.pop()
+            elif char == "{":
+                stack.append("}")
+            elif char == "[":
+                stack.append("]")
+            elif (char == "}" or char == "]") and stack:
+                # Ideally the character should match stack[-1]
+                # If not, the JSON is likely malformed, but we proceed
+                if stack[-1] == char:
+                    stack.pop()
 
         # Construct repaired string
         repaired = text
         if in_string:
             repaired += '"'
-            
+
         # Close everything remaining on stack in reverse order
         while stack:
             repaired += stack.pop()
-            
+
         return repaired
 
-    def _collect_balanced_brace_segments(self, text: str) -> List[str]:
+    def _collect_balanced_brace_segments(self, text: str) -> list[str]:
         """Collect all top-level balanced brace substrings from text.
         Returns a list of substrings that start with '{' and end with the matching '}'.
         """
-        segments: List[str] = []
+        segments: list[str] = []
         brace_count = 0
-        start_idx: Optional[int] = None
+        start_idx: int | None = None
         for i, ch in enumerate(text):
-            if ch == '{':
+            if ch == "{":
                 if brace_count == 0:
                     start_idx = i
                 brace_count += 1
-            elif ch == '}':
+            elif ch == "}":
                 if brace_count > 0:
                     brace_count -= 1
                     if brace_count == 0 and start_idx is not None:
-                        segment = text[start_idx:i+1]
+                        segment = text[start_idx : i + 1]
                         segments.append(segment)
                         start_idx = None
         return segments
 
-    def _collect_balanced_bracket_segments(self, text: str) -> List[str]:
+    def _collect_balanced_bracket_segments(self, text: str) -> list[str]:
         """Collect all top-level balanced bracket substrings from text.
         Returns a list of substrings that start with '[' and end with the matching ']'.
         """
-        segments: List[str] = []
+        segments: list[str] = []
         bracket_count = 0
-        start_idx: Optional[int] = None
+        start_idx: int | None = None
         for i, ch in enumerate(text):
-            if ch == '[':
+            if ch == "[":
                 if bracket_count == 0:
                     start_idx = i
                 bracket_count += 1
-            elif ch == ']':
+            elif ch == "]":
                 if bracket_count > 0:
                     bracket_count -= 1
                     if bracket_count == 0 and start_idx is not None:
-                        segment = text[start_idx:i+1]
+                        segment = text[start_idx : i + 1]
                         segments.append(segment)
                         start_idx = None
         return segments
-    
+
     def _parse_priority(self, priority_value: Any) -> ReviewPriority:
         """Parse priority from AI response."""
         if not priority_value:
             return ReviewPriority.MEDIUM
-        
+
         try:
             priority_str = str(priority_value).lower()
             priority_mapping = {
-                'critical': ReviewPriority.CRITICAL,
-                'high': ReviewPriority.HIGH,
-                'medium': ReviewPriority.MEDIUM,
-                'low': ReviewPriority.LOW
+                "critical": ReviewPriority.CRITICAL,
+                "high": ReviewPriority.HIGH,
+                "medium": ReviewPriority.MEDIUM,
+                "low": ReviewPriority.LOW,
             }
             return priority_mapping.get(priority_str, ReviewPriority.MEDIUM)
         except Exception:
             return ReviewPriority.MEDIUM
-    
-    def _parse_confidence(self, confidence_value: Any) -> Optional[float]:
+
+    def _parse_confidence(self, confidence_value: Any) -> float | None:
         """Parse confidence score from AI response."""
         if confidence_value is None:
             return None
-        
+
         try:
             confidence = float(confidence_value)
             return max(0.0, min(1.0, confidence))  # Clamp to [0, 1]
         except (ValueError, TypeError):
             return None
-    
-    def get_statistics(self) -> Dict[str, Any]:
+
+    def get_statistics(self) -> dict[str, Any]:
         """Get client usage statistics."""
         success_rate = 0.0
         if self._total_requests > 0:
             success_rate = self._successful_requests / self._total_requests
-        
+
         return {
-            'total_requests': self._total_requests,
-            'successful_requests': self._successful_requests,
-            'failed_requests': self._failed_requests,
-            'success_rate': success_rate,
-            'total_tokens_used': self._total_tokens_used,
-            'model_name': self.config.model_name
+            "total_requests": self._total_requests,
+            "successful_requests": self._successful_requests,
+            "failed_requests": self._failed_requests,
+            "success_rate": success_rate,
+            "total_tokens_used": self._total_tokens_used,
+            "model_name": self.config.model_name,
         }
-    
+
     def test_connection(self) -> bool:
         """Test connection to Gemini API."""
         try:
             test_prompt = "Respond with 'OK' if you can read this message."
             response = self._model.generate_content(test_prompt)
-            return response and hasattr(response, 'text') and response.text.strip()
+            return response and hasattr(response, "text") and response.text.strip()
         except Exception as e:
             logger.error(f"Connection test failed: {str(e)}")
             return False
-    
+
     def estimate_tokens(self, text: str) -> int:
         """Estimate token count for a text (rough approximation)."""
         # Rough approximation: 1 token ≈ 4 characters for English text
         # This is just an estimate since we don't have direct access to the tokenizer
         return len(text) // 4
-    
+
     def close(self):
         """Clean up resources."""
         logger.debug("Gemini client closed")

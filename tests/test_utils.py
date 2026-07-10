@@ -2,16 +2,14 @@
 Comprehensive tests for gemini_reviewer/utils.py
 """
 
-import pytest
-
 from gemini_reviewer.utils import (
-    matches_pattern,
-    is_test_file,
-    is_doc_file,
     get_file_language,
-    sanitize_text,
-    sanitize_code_content,
     is_binary_file,
+    is_doc_file,
+    is_test_file,
+    matches_pattern,
+    sanitize_code_content,
+    sanitize_text,
 )
 
 

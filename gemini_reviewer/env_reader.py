@@ -6,44 +6,43 @@ with type conversion and fallback values, following DRY principles.
 """
 
 import os
-from typing import TypeVar, Callable, Optional, List
 from enum import Enum
+from typing import TypeVar
 
-
-T = TypeVar('T')
+T = TypeVar("T")
 
 
 def get_env_str(key: str, default: str = "", *fallback_keys: str) -> str:
     """Get string value from environment with fallback keys.
-    
+
     Args:
         key: Primary environment variable key
         default: Default value if not found
         *fallback_keys: Additional keys to try if primary is not found
-        
+
     Returns:
         The environment variable value or default
     """
     value = os.environ.get(key, "")
     if value:
         return value
-    
+
     for fallback_key in fallback_keys:
         value = os.environ.get(fallback_key, "")
         if value:
             return value
-    
+
     return default
 
 
 def get_env_int(key: str, default: int, *fallback_keys: str) -> int:
     """Get integer value from environment with fallback keys.
-    
+
     Args:
         key: Primary environment variable key
         default: Default value if not found or conversion fails
         *fallback_keys: Additional keys to try if primary is not found
-        
+
     Returns:
         The environment variable value as integer or default
     """
@@ -58,12 +57,12 @@ def get_env_int(key: str, default: int, *fallback_keys: str) -> int:
 
 def get_env_float(key: str, default: float, *fallback_keys: str) -> float:
     """Get float value from environment with fallback keys.
-    
+
     Args:
         key: Primary environment variable key
         default: Default value if not found or conversion fails
         *fallback_keys: Additional keys to try if primary is not found
-        
+
     Returns:
         The environment variable value as float or default
     """
@@ -78,31 +77,31 @@ def get_env_float(key: str, default: float, *fallback_keys: str) -> float:
 
 def get_env_bool(key: str, default: bool, *fallback_keys: str) -> bool:
     """Get boolean value from environment with fallback keys.
-    
+
     Recognizes 'true', 'yes', '1' as True (case-insensitive).
-    
+
     Args:
         key: Primary environment variable key
         default: Default value if not found
         *fallback_keys: Additional keys to try if primary is not found
-        
+
     Returns:
         The environment variable value as boolean or default
     """
     value = get_env_str(key, "", *fallback_keys)
     if value:
-        return value.lower() in ('true', 'yes', '1')
+        return value.lower() in ("true", "yes", "1")
     return default
 
 
-def get_env_list(key: str, separator: str = ",", *fallback_keys: str) -> List[str]:
+def get_env_list(key: str, separator: str = ",", *fallback_keys: str) -> list[str]:
     """Get list of strings from environment with fallback keys.
-    
+
     Args:
         key: Primary environment variable key
         separator: String separator for splitting
         *fallback_keys: Additional keys to try if primary is not found
-        
+
     Returns:
         List of strings split from the environment variable
     """
@@ -114,13 +113,13 @@ def get_env_list(key: str, separator: str = ",", *fallback_keys: str) -> List[st
 
 def get_env_enum(key: str, enum_class: type[Enum], default: Enum, *fallback_keys: str) -> Enum:
     """Get enum value from environment with fallback keys.
-    
+
     Args:
         key: Primary environment variable key
         enum_class: The enum class to convert to
         default: Default enum value if not found or conversion fails
         *fallback_keys: Additional keys to try if primary is not found
-        
+
     Returns:
         The environment variable value as enum or default
     """

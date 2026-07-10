@@ -2,21 +2,18 @@
 Comprehensive tests for gemini_reviewer/models.py
 """
 
-import pytest
-from dataclasses import fields
-
 from gemini_reviewer.models import (
-    ReviewPriority,
-    ReviewFocus,
-    PRDetails,
+    AIResponse,
+    AnalysisContext,
+    DiffFile,
     FileInfo,
     HunkInfo,
-    DiffFile,
-    ReviewComment,
-    AIResponse,
-    ReviewResult,
-    AnalysisContext,
+    PRDetails,
     ProcessingStats,
+    ReviewComment,
+    ReviewFocus,
+    ReviewPriority,
+    ReviewResult,
 )
 
 

@@ -2,22 +2,21 @@
 Comprehensive tests for gemini_reviewer/env_reader.py
 """
 
-import os
-import pytest
 from enum import Enum
 
 from gemini_reviewer.env_reader import (
-    get_env_str,
-    get_env_int,
-    get_env_float,
     get_env_bool,
-    get_env_list,
     get_env_enum,
+    get_env_float,
+    get_env_int,
+    get_env_list,
+    get_env_str,
 )
 
 
 class SampleEnum(Enum):
     """Sample enum for testing."""
+
     VALUE_A = "value_a"
     VALUE_B = "value_b"
     VALUE_C = "value_c"

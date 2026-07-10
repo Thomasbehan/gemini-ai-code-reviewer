@@ -2,14 +2,12 @@
 Comprehensive tests for gemini_reviewer/prompts.py
 """
 
-import pytest
-
 from gemini_reviewer.prompts import (
-    ReviewMode,
     BASE_PROMPT_TEMPLATE,
-    NOISE_CONTROL,
-    MODE_INSTRUCTIONS,
     FOLLOWUP_PROMPT_TEMPLATE,
+    MODE_INSTRUCTIONS,
+    NOISE_CONTROL,
+    ReviewMode,
     get_review_prompt_template,
 )
 

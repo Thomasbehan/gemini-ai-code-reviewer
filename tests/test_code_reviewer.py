@@ -2,20 +2,19 @@
 Comprehensive tests for gemini_reviewer/code_reviewer.py
 """
 
+from unittest.mock import AsyncMock, Mock, patch
+
 import pytest
-from unittest.mock import Mock, MagicMock, patch, AsyncMock
-import asyncio
 
 from gemini_reviewer.code_reviewer import CodeReviewer, CodeReviewerError
-from gemini_reviewer.config import Config, GitHubConfig, GeminiConfig, ReviewConfig
+from gemini_reviewer.config import Config, GeminiConfig, GitHubConfig, ReviewConfig
 from gemini_reviewer.models import (
-    PRDetails,
-    ReviewResult,
-    ReviewComment,
     DiffFile,
     FileInfo,
     HunkInfo,
-    ReviewPriority,
+    PRDetails,
+    ReviewComment,
+    ReviewResult,
 )
 
 
@@ -62,9 +61,7 @@ class TestCodeReviewer:
         return [
             DiffFile(
                 file_info=FileInfo(path="main.py"),
-                hunks=[
-                    HunkInfo(1, 5, 1, 7, "", "@@ -1,5 +1,7 @@", ["+line"])
-                ],
+                hunks=[HunkInfo(1, 5, 1, 7, "", "@@ -1,5 +1,7 @@", ["+line"])],
             ),
         ]
 
@@ -189,9 +186,7 @@ class TestCodeReviewerReviewProcess:
         mock_github.return_value.get_existing_bot_comments.return_value = []
         mock_github.return_value.filter_out_existing_comments.return_value = []
 
-        mock_diff_parser.return_value.parse_diff.return_value = [
-            DiffFile(FileInfo(path="main.py"), hunks=[])
-        ]
+        mock_diff_parser.return_value.parse_diff.return_value = [DiffFile(FileInfo(path="main.py"), hunks=[])]
         mock_diff_parser.return_value.filter_files.return_value = []
         mock_diff_parser.return_value.filter_large_hunks.return_value = []
         mock_diff_parser.return_value.get_parsing_statistics.return_value = {
@@ -244,7 +239,7 @@ class TestCodeReviewerFiltering:
         mock_diff_parser.return_value.filter_large_hunks.return_value = diff_files
 
         reviewer = CodeReviewer(mock_config)
-        result = await reviewer._filter_files(diff_files)
+        await reviewer._filter_files(diff_files)
 
         # Should have called should_review_file for each file
         assert mock_config.should_review_file.call_count == 2
@@ -276,9 +271,7 @@ class TestCodeReviewerStatistics:
     ):
         """Test getting processing statistics."""
         mock_gemini.return_value.get_statistics.return_value = {"total_requests": 0}
-        mock_diff_parser.return_value.get_parsing_statistics.return_value = {
-            "parsed_files": 0
-        }
+        mock_diff_parser.return_value.get_parsing_statistics.return_value = {"parsed_files": 0}
         mock_github.return_value.check_rate_limit.return_value = {"core": {}}
 
         reviewer = CodeReviewer(mock_config)
@@ -401,15 +394,11 @@ class TestCodeReviewerChangeSummary:
         diff_files = [
             DiffFile(
                 file_info=FileInfo(path="main.py"),
-                hunks=[
-                    HunkInfo(1, 5, 1, 7, "", "", ["+def hello():", "+    pass", "-old"])
-                ],
+                hunks=[HunkInfo(1, 5, 1, 7, "", "", ["+def hello():", "+    pass", "-old"])],
             ),
             DiffFile(
                 file_info=FileInfo(path="new.py", is_new_file=True),
-                hunks=[
-                    HunkInfo(0, 0, 1, 3, "", "", ["+line1", "+line2", "+line3"])
-                ],
+                hunks=[HunkInfo(0, 0, 1, 3, "", "", ["+line1", "+line2", "+line3"])],
             ),
         ]
 
@@ -438,9 +427,7 @@ class TestCodeReviewerChangeSummary:
         diff_files = [
             DiffFile(
                 file_info=FileInfo(path="main.py"),
-                hunks=[
-                    HunkInfo(1, 1, 1, 3, "", "", ["+def my_function():", "+    return True"])
-                ],
+                hunks=[HunkInfo(1, 1, 1, 3, "", "", ["+def my_function():", "+    return True"])],
             ),
         ]
 
@@ -488,9 +475,7 @@ class TestCodeReviewerAnalysis:
         return [
             DiffFile(
                 file_info=FileInfo(path="main.py"),
-                hunks=[
-                    HunkInfo(1, 5, 1, 7, "+new code", "@@ -1,5 +1,7 @@", ["+line1"])
-                ],
+                hunks=[HunkInfo(1, 5, 1, 7, "+new code", "@@ -1,5 +1,7 @@", ["+line1"])],
             ),
         ]
 
@@ -519,9 +504,7 @@ class TestCodeReviewerAnalysis:
         """Test analyzing files sequentially."""
         mock_context.return_value.detect_related_files = AsyncMock(return_value=[])
         mock_context.return_value.build_project_context = AsyncMock(return_value=None)
-        mock_context.return_value.build_analysis_context = AsyncMock(
-            return_value=Mock()
-        )
+        mock_context.return_value.build_analysis_context = AsyncMock(return_value=Mock())
         mock_gemini.return_value.analyze_code_hunk.return_value = []
 
         reviewer = CodeReviewer(mock_config)
@@ -552,9 +535,7 @@ class TestCodeReviewerAnalysis:
         """Test analyzing files concurrently."""
         mock_context.return_value.detect_related_files = AsyncMock(return_value=[])
         mock_context.return_value.build_project_context = AsyncMock(return_value=None)
-        mock_context.return_value.build_analysis_context = AsyncMock(
-            return_value=Mock()
-        )
+        mock_context.return_value.build_analysis_context = AsyncMock(return_value=Mock())
         mock_gemini.return_value.analyze_code_hunk.return_value = []
 
         reviewer = CodeReviewer(mock_config)
@@ -581,9 +562,7 @@ class TestCodeReviewerSingleFile:
         """Create a sample diff file."""
         return DiffFile(
             file_info=FileInfo(path="main.py"),
-            hunks=[
-                HunkInfo(1, 5, 1, 7, "+code", "@@ -1,5 +1,7 @@", ["+line"])
-            ],
+            hunks=[HunkInfo(1, 5, 1, 7, "+code", "@@ -1,5 +1,7 @@", ["+line"])],
         )
 
     @pytest.fixture
@@ -611,9 +590,7 @@ class TestCodeReviewerSingleFile:
         """Test analyzing a single file."""
         mock_context.return_value.detect_related_files = AsyncMock(return_value=[])
         mock_context.return_value.build_project_context = AsyncMock(return_value=None)
-        mock_context.return_value.build_analysis_context = AsyncMock(
-            return_value=Mock()
-        )
+        mock_context.return_value.build_analysis_context = AsyncMock(return_value=Mock())
         mock_gemini.return_value.analyze_code_hunk.return_value = []
 
         reviewer = CodeReviewer(mock_config)
@@ -621,8 +598,6 @@ class TestCodeReviewerSingleFile:
         result = await reviewer._analyze_single_file(sample_diff_file, sample_pr_details)
 
         assert isinstance(result, list)
-
-
 
 
 class TestCodeReviewerGetDiff:
@@ -708,6 +683,7 @@ class TestCodeReviewerGetDiff:
     ):
         """Test getting PR diff with GitHubClientError."""
         from gemini_reviewer.github_client import GitHubClientError
+
         mock_github.return_value.get_last_reviewed_commit_sha.return_value = None
         mock_github.return_value.get_pr_diff.side_effect = GitHubClientError("API Error")
 
@@ -743,9 +719,7 @@ class TestCodeReviewerParseDiff:
         mock_config,
     ):
         """Test successful diff parsing."""
-        mock_diff_parser.return_value.parse_diff.return_value = [
-            DiffFile(FileInfo(path="test.py"), hunks=[])
-        ]
+        mock_diff_parser.return_value.parse_diff.return_value = [DiffFile(FileInfo(path="test.py"), hunks=[])]
 
         reviewer = CodeReviewer(mock_config)
         result = await reviewer._parse_diff("diff content")
@@ -769,6 +743,7 @@ class TestCodeReviewerParseDiff:
     ):
         """Test diff parsing with exception."""
         from gemini_reviewer.diff_parser import DiffParsingError
+
         mock_diff_parser.return_value.parse_diff.side_effect = DiffParsingError("Parse error")
 
         reviewer = CodeReviewer(mock_config)
@@ -809,12 +784,8 @@ class TestCodeReviewerCreateReview:
         sample_pr_details,
     ):
         """Test creating GitHub review with comments."""
-        mock_comment_proc.return_value.filter_and_prioritize.return_value = [
-            ReviewComment("Fix", "test.py", 1)
-        ]
-        mock_github.return_value.filter_out_existing_comments.return_value = [
-            ReviewComment("Fix", "test.py", 1)
-        ]
+        mock_comment_proc.return_value.filter_and_prioritize.return_value = [ReviewComment("Fix", "test.py", 1)]
+        mock_github.return_value.filter_out_existing_comments.return_value = [ReviewComment("Fix", "test.py", 1)]
         mock_github.return_value.create_review.return_value = True
 
         reviewer = CodeReviewer(mock_config)
@@ -1245,9 +1216,7 @@ class TestCodeReviewerFollowUpReplies:
         mock_github.return_value.reply_to_comment.side_effect = Exception("API Error")
 
         reviewer = CodeReviewer(mock_config)
-        reviewer._previous_bot_comments = [
-            {"path": "main.py", "line": 1, "body": "Fix", "id": 123}
-        ]
+        reviewer._previous_bot_comments = [{"path": "main.py", "line": 1, "body": "Fix", "id": 123}]
         reviewer._unresolved_prior_ids = set()
 
         comment = ReviewComment("Reply", "main.py", 1)
@@ -1338,9 +1307,7 @@ class TestCodeReviewerResolveComments:
 
         reviewer = CodeReviewer(mock_config)
         reviewer._is_followup_review = True
-        reviewer._previous_bot_comments = [
-            {"path": "main.py", "id": 123, "body": "Fix this"}
-        ]
+        reviewer._previous_bot_comments = [{"path": "main.py", "id": 123, "body": "Fix this"}]
         reviewer._current_review_file_paths = {"main.py"}
         reviewer._unresolved_prior_ids = set()
 
@@ -1367,9 +1334,7 @@ class TestCodeReviewerResolveComments:
         """Test resolve skips comments still unresolved."""
         reviewer = CodeReviewer(mock_config)
         reviewer._is_followup_review = True
-        reviewer._previous_bot_comments = [
-            {"path": "main.py", "id": 123, "body": "Fix"}
-        ]
+        reviewer._previous_bot_comments = [{"path": "main.py", "id": 123, "body": "Fix"}]
         reviewer._current_review_file_paths = {"main.py"}
         reviewer._unresolved_prior_ids = {123}
 
@@ -1495,6 +1460,7 @@ class TestCodeReviewerCreateReviewEvents:
     ):
         """Test creating review handles GitHubClientError."""
         from gemini_reviewer.github_client import GitHubClientError
+
         mock_github.return_value.filter_out_existing_comments.return_value = []
         mock_comment_proc.return_value.filter_comments_by_priority.return_value = []
         mock_comment_proc.return_value.apply_comment_limits.return_value = []
@@ -1678,7 +1644,7 @@ class TestCodeReviewerChangeSummaryExtended:
         summary = reviewer._build_change_summary(diff_files)
 
         # Should have header (2 lines: title + blank) + files (limited to 30 total entries)
-        lines = [l for l in summary.split("\n") if l.strip()]
+        lines = [line for line in summary.split("\n") if line.strip()]
         assert len(lines) <= 31  # Header + up to 30 file entries
 
 
@@ -1964,6 +1930,8 @@ class TestCodeReviewerAnalysisSingleFileExtended:
 
         mock_github.return_value.get_file_content.return_value = "print('hello')"
         mock_github.return_value._compute_signature.return_value = "sig123"
+        # Verify pass keeps the single finding.
+        mock_gemini.return_value.verify_findings.return_value = [1]
 
         diff_file = DiffFile(
             file_info=FileInfo(path="main.py"),
@@ -2205,7 +2173,7 @@ class TestCodeReviewerReviewNoFiles:
     @pytest.fixture
     def mock_config(self):
         """Create a mock config."""
-        from gemini_reviewer.config import Config, GeminiConfig, GitHubConfig, ReviewConfig
+        from gemini_reviewer.config import Config, GeminiConfig, GitHubConfig
 
         return Config(
             gemini=GeminiConfig(api_key="AIzaSy_test_key_12345"),
@@ -2342,7 +2310,7 @@ class TestCodeReviewerFollowUpMode:
     @pytest.fixture
     def mock_config(self):
         """Create a mock config."""
-        from gemini_reviewer.config import Config, GeminiConfig, GitHubConfig, ReviewConfig
+        from gemini_reviewer.config import Config, GeminiConfig, GitHubConfig
 
         return Config(
             gemini=GeminiConfig(api_key="AIzaSy_test_key_12345"),
@@ -2395,7 +2363,7 @@ class TestCodeReviewerSequentialProcessing:
     @pytest.fixture
     def mock_config(self):
         """Create a mock config with concurrent processing disabled."""
-        from gemini_reviewer.config import Config, GeminiConfig, GitHubConfig, ReviewConfig, PerformanceConfig
+        from gemini_reviewer.config import Config, GeminiConfig, GitHubConfig, PerformanceConfig
 
         return Config(
             gemini=GeminiConfig(api_key="AIzaSy_test_key_12345"),
@@ -2449,7 +2417,7 @@ class TestCodeReviewerDiffRetrievalAdvanced:
     @pytest.fixture
     def mock_config(self):
         """Create a mock config."""
-        from gemini_reviewer.config import Config, GeminiConfig, GitHubConfig, ReviewConfig, PerformanceConfig
+        from gemini_reviewer.config import Config, GeminiConfig, GitHubConfig, PerformanceConfig
 
         return Config(
             gemini=GeminiConfig(api_key="AIzaSy_test_key_12345"),
@@ -2540,7 +2508,7 @@ class TestCodeReviewerFileFiltering:
         with patch("gemini_reviewer.code_reviewer.GitHubClient"):
             with patch("gemini_reviewer.code_reviewer.GeminiClient"):
                 reviewer = CodeReviewer(mock_config)
-                if hasattr(reviewer, '_should_skip_file'):
+                if hasattr(reviewer, "_should_skip_file"):
                     file_info = FileInfo("test.png", "image/png")
                     result = reviewer._should_skip_file(file_info)
                     assert isinstance(result, bool)
@@ -2550,7 +2518,7 @@ class TestCodeReviewerFileFiltering:
         with patch("gemini_reviewer.code_reviewer.GitHubClient"):
             with patch("gemini_reviewer.code_reviewer.GeminiClient"):
                 reviewer = CodeReviewer(mock_config)
-                if hasattr(reviewer, '_should_skip_file'):
+                if hasattr(reviewer, "_should_skip_file"):
                     file_info = FileInfo("package-lock.json", "json")
                     result = reviewer._should_skip_file(file_info)
                     assert isinstance(result, bool)
@@ -2576,7 +2544,7 @@ class TestCodeReviewerHunkProcessing:
             target_length=6,
             content=" line1\n-line2\n+line2modified\n+newline\n line3",
             header="@@ -1,5 +1,6 @@",
-            lines=[" line1", "-line2", "+line2modified", "+newline", " line3"]
+            lines=[" line1", "-line2", "+line2modified", "+newline", " line3"],
         )
 
     def test_process_hunk_empty_content(self, mock_config):
@@ -2591,14 +2559,14 @@ class TestCodeReviewerHunkProcessing:
                     target_length=1,
                     content="",
                     header="@@ -1,1 +1,1 @@",
-                    lines=[]
+                    lines=[],
                 )
-                if hasattr(reviewer, '_process_hunk'):
+                if hasattr(reviewer, "_process_hunk"):
                     result = reviewer._process_hunk(empty_hunk, {})
                     assert result is None or isinstance(result, list)
 
 
-class TestCodeReviewerStatistics:
+class TestCodeReviewerStatisticsAdditional:
     """Tests for statistics tracking."""
 
     @pytest.fixture
@@ -2613,7 +2581,7 @@ class TestCodeReviewerStatistics:
         with patch("gemini_reviewer.code_reviewer.GitHubClient"):
             with patch("gemini_reviewer.code_reviewer.GeminiClient"):
                 reviewer = CodeReviewer(mock_config)
-                if hasattr(reviewer, 'get_statistics'):
+                if hasattr(reviewer, "get_statistics"):
                     stats = reviewer.get_statistics()
                     assert isinstance(stats, dict)
 
@@ -2637,13 +2605,130 @@ class TestCodeReviewerConfigFiltering:
         reviewer = CodeReviewer(mock_config)
 
         # Create a diff file with a path that might be excluded
-        diff_file = DiffFile(
-            file_info=FileInfo(path="test.min.js")
-        )
+        diff_file = DiffFile(file_info=FileInfo(path="test.min.js"))
 
         # Check if the filter method exists
-        if hasattr(reviewer, '_filter_files'):
+        if hasattr(reviewer, "_filter_files"):
             # Mock the should_review_file to return False
-            with patch.object(mock_config, 'should_review_file', return_value=False):
+            with patch.object(mock_config, "should_review_file", return_value=False):
                 result = await reviewer._filter_files([diff_file])
                 assert isinstance(result, list)
+
+
+class TestHandleReviewCommentReply:
+    """Tests for CodeReviewer.handle_review_comment_reply (in-thread replies)."""
+
+    @pytest.fixture
+    def mock_config(self):
+        return Config(
+            github=GitHubConfig(token="ghp_test123456789012"), gemini=GeminiConfig(api_key="AIzaSyTestKey123456")
+        )
+
+    def _reviewer(self, mock_config):
+        with (
+            patch("gemini_reviewer.code_reviewer.GitHubClient"),
+            patch("gemini_reviewer.code_reviewer.GeminiClient"),
+            patch("gemini_reviewer.code_reviewer.DiffParser"),
+            patch("gemini_reviewer.code_reviewer.ContextBuilder"),
+            patch("gemini_reviewer.code_reviewer.CommentProcessor"),
+        ):
+            return CodeReviewer(mock_config)
+
+    def _event(self, tmp_path, in_reply_to_id=100):
+        import json as _json
+
+        p = tmp_path / "event.json"
+        p.write_text(_json.dumps({"comment": {"in_reply_to_id": in_reply_to_id, "body": "human reply"}}))
+        return str(p)
+
+    def _pr(self):
+        return PRDetails("owner", "repo", 123, "T", "D", "sha")
+
+    def test_posts_reply_on_bot_thread(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        reviewer.github_client.get_pr_details_from_event.return_value = self._pr()
+        reviewer.github_client.get_review_comment_thread.return_value = {
+            "root_id": 100,
+            "root_body": "Bug here",
+            "code_context": "@@hunk",
+            "root_is_bot": True,
+            "messages": [
+                {"author": "bot", "body": "Bug here", "is_bot": True},
+                {"author": "alice", "body": "why?", "is_bot": False},
+            ],
+            "bot_login": "bot",
+        }
+        reviewer.gemini_client.respond_to_reply.return_value = {"reply": "Because line 4.", "resolved": False}
+        reviewer.github_client._append_signature_marker.return_value = "Because line 4.\n<!-- AI-SIG:abc123 -->"
+        reviewer.github_client.reply_to_comment.return_value = True
+
+        assert reviewer.handle_review_comment_reply(self._event(tmp_path)) is True
+        reviewer.github_client.reply_to_comment.assert_called_once()
+        # The posted body is the signed reply.
+        args = reviewer.github_client.reply_to_comment.call_args[0]
+        assert args[1] == 100
+        assert "AI-SIG" in args[2]
+
+    def test_skips_when_no_in_reply_to(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        import json as _json
+
+        p = tmp_path / "e.json"
+        p.write_text(_json.dumps({"comment": {"body": "top-level"}}))
+        assert reviewer.handle_review_comment_reply(str(p)) is False
+        reviewer.github_client.get_review_comment_thread.assert_not_called()
+
+    def test_skips_when_thread_unresolved(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        reviewer.github_client.get_pr_details_from_event.return_value = self._pr()
+        reviewer.github_client.get_review_comment_thread.return_value = None
+        assert reviewer.handle_review_comment_reply(self._event(tmp_path)) is False
+
+    def test_skips_when_root_not_bot(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        reviewer.github_client.get_pr_details_from_event.return_value = self._pr()
+        reviewer.github_client.get_review_comment_thread.return_value = {
+            "root_id": 100,
+            "root_body": "human comment",
+            "code_context": "",
+            "root_is_bot": False,
+            "messages": [],
+            "bot_login": "bot",
+        }
+        assert reviewer.handle_review_comment_reply(self._event(tmp_path)) is False
+        reviewer.gemini_client.respond_to_reply.assert_not_called()
+
+    def test_loop_guard_last_message_is_bot(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        reviewer.github_client.get_pr_details_from_event.return_value = self._pr()
+        reviewer.github_client.get_review_comment_thread.return_value = {
+            "root_id": 100,
+            "root_body": "Bug",
+            "code_context": "",
+            "root_is_bot": True,
+            "messages": [{"author": "bot", "body": "Bug", "is_bot": True}],
+            "bot_login": "bot",
+        }
+        assert reviewer.handle_review_comment_reply(self._event(tmp_path)) is False
+        reviewer.gemini_client.respond_to_reply.assert_not_called()
+
+    def test_skips_when_empty_reply_generated(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        reviewer.github_client.get_pr_details_from_event.return_value = self._pr()
+        reviewer.github_client.get_review_comment_thread.return_value = {
+            "root_id": 100,
+            "root_body": "Bug",
+            "code_context": "",
+            "root_is_bot": True,
+            "messages": [{"author": "alice", "body": "why?", "is_bot": False}],
+            "bot_login": "bot",
+        }
+        reviewer.gemini_client.respond_to_reply.return_value = {"reply": "", "resolved": False}
+        assert reviewer.handle_review_comment_reply(self._event(tmp_path)) is False
+        reviewer.github_client.reply_to_comment.assert_not_called()
+
+    def test_bad_event_file_returns_false(self, mock_config, tmp_path):
+        reviewer = self._reviewer(mock_config)
+        p = tmp_path / "bad.json"
+        p.write_text("{not json")
+        assert reviewer.handle_review_comment_reply(str(p)) is False
