@@ -313,18 +313,24 @@ STRICT OUTPUT RULES:
 
 # Second-pass verification prompt. A first pass proposes candidate findings for a
 # single file; this pass ruthlessly drops false positives before anything is posted.
-VERIFY_PROMPT_TEMPLATE = """You are the SECOND-PASS VERIFIER for an automated code review. A first pass produced the candidate findings below for ONE changed file. Keep only findings that are real, correct, and worth a reviewer's comment — drop false positives ruthlessly. Being wrong erodes trust faster than missing a minor issue.
+VERIFY_PROMPT_TEMPLATE = """You are the SECOND-PASS VERIFIER for an automated code review. A first pass produced the candidate findings below for ONE changed file. Your ONLY job is to remove clear false positives. You are a filter for wrongness, NOT a filter for severity — a valid low-priority standards or maintainability point stays.
 
-KEEP a finding only if ALL hold:
-- It describes a genuine defect (bug, security issue, or real standards violation) in the CHANGED ('+') lines of the diff — not in unchanged context, not hypothetical.
-- The failure is concrete and correct: you can name the input/state that triggers it and the wrong output/crash.
-- The surrounding code / project context does NOT already handle or guard the concern.
-- The proposed fix is correct and would not itself introduce a problem.
-DROP a finding if it is speculative, a matter of taste, already handled, factually wrong, duplicated, or not actually present in the changed lines.
+DROP a finding ONLY if one of these is clearly true:
+- It is not actually present in the changed ('+') lines of this diff (hallucinated, or about code that isn't here).
+- It is factually wrong about what the code does.
+- The concern is already correctly handled/guarded by code visible in the diff or context.
+- It is a pure duplicate of another candidate finding.
+- It is pure subjective taste with no rule, convention, or defect behind it.
+- Its proposed fix is itself broken and there is no real underlying issue.
+
+KEEP everything else. In particular:
+- KEEP valid standards / convention / maintainability / design findings even when nothing crashes (e.g. wrong layer, missing assertion, banned API, naming, duplication, wrong selector, direct service access). These do not need a concrete runtime failure to be worth raising.
+- KEEP correctness/security bugs when you can see the triggering input/state.
+- When you are UNSURE whether a finding is valid, KEEP it. Missing a real issue is worse than posting a borderline-but-defensible one; only clear false positives get dropped.
 
 Respond with ONLY valid JSON, nothing else:
 {{"keep": [<1-based indices of findings to KEEP>], "notes": "one short line on anything dropped and why"}}
-If none survive: {{"keep": [], "notes": "..."}}
+If genuinely all are false positives: {{"keep": [], "notes": "..."}}
 
 DIFF UNDER REVIEW:
 {diff}
