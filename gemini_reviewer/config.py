@@ -56,7 +56,7 @@ class GeminiConfig:
     """Configuration for Gemini AI integration."""
 
     api_key: str
-    model_name: str = "gemini-3-flash-preview"
+    model_name: str = "gemini-3.8-flash"
     max_output_tokens: int = 8192
     temperature: float = 0.0  # Lower temperature for more precise, deterministic code reviews
     top_p: float = 0.9  # Slightly lower for more focused output
@@ -186,7 +186,7 @@ class Config:
         # Gemini configuration
         gemini_config = GeminiConfig(
             api_key=gemini_api_key,
-            model_name=get_env_str("GEMINI_MODEL", "gemini-3-flash-preview"),
+            model_name=get_env_str("GEMINI_MODEL", "gemini-3.8-flash"),
             temperature=get_env_float("GEMINI_TEMPERATURE", 0.0),
             top_p=get_env_float("GEMINI_TOP_P", 0.9),
             max_output_tokens=get_env_int("GEMINI_MAX_TOKENS", 8192),
