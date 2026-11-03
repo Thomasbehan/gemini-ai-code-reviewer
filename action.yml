@@ -13,9 +13,9 @@ inputs:
     description: 'Google Gemini API key'
     required: true
   GEMINI_MODEL:
-    description: 'The Gemini model to use for code review'
+    description: 'Deprecated and ignored. Reviews always use the model pinned by this action (gemini-3.8-flash).'
     required: false
-    default: 'gemini-3.8-flash'
+    deprecationMessage: 'GEMINI_MODEL is deprecated and ignored; reviews always use the model pinned by this action. Remove it from your workflow.'
   EXCLUDE:
     description: 'Comma-separated list of file patterns to exclude'
     required: false

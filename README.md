@@ -71,7 +71,6 @@ jobs:
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-3.8-flash # Optional, default is `gemini-3.8-flash`
           EXCLUDE: "*.md,*.txt,package-lock.json,*.yml,*.yaml"
           SYSTEM_PROMPT: | # Optional: Custom system prompt for code reviews
             Review the code with the following guidelines:
@@ -125,7 +124,6 @@ jobs:
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-3.8-flash # Optional, default is `gemini-3.8-flash`
           EXCLUDE: "*.md,*.txt,package-lock.json,*.yml,*.yaml"
           SYSTEM_PROMPT: | # Optional: Custom system prompt for code reviews
             Review the code with the following guidelines:
@@ -194,10 +192,9 @@ Example usage in workflow inputs (maps to env):
     REVIEW_PRIORITY_THRESHOLD: high
     REVIEW_MODE: lenient
 ```
-- **GEMINI_MODEL**: The Gemini model to use for code review (default: `gemini-3.8-flash`)
-  - Flash models offer speed and multimodal capabilities suited to a wide variety of tasks, including code review.
-  - Pro models offer longer context windows and stronger reasoning for complex reviews.
-  - For detailed information about available models, refer to [Gemini models](https://ai.google.dev/gemini-api/docs/models/gemini).
+- **Model**: reviews always run on `gemini-3.8-flash`, pinned by this action so every repository gets the same
+  reviewer. **`GEMINI_MODEL` is deprecated and ignored**: if it is set, the run logs a warning asking you to remove it
+  and carries on with the pinned model.
   
 - **EXCLUDE**: Comma-separated list of file patterns to exclude from review (e.g., `*.md,*.txt,package-lock.json`)
   

@@ -5,6 +5,8 @@ This module handles all configuration aspects including environment variables,
 validation, and default settings.
 """
 
+import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -23,7 +25,12 @@ from .validators import (
     validate_required_string,
 )
 
+logger = logging.getLogger(__name__)
+
 THINKING_LEVELS = ("low", "medium", "high")
+
+# Every consumer runs this model. It is deliberately not configurable: changing it is a release of this action.
+GEMINI_MODEL_NAME = "gemini-3.8-flash"
 
 
 class LogLevel(Enum):
@@ -58,7 +65,7 @@ class GeminiConfig:
     """Configuration for Gemini AI integration."""
 
     api_key: str
-    model_name: str = "gemini-3.8-flash"
+    model_name: str = field(default=GEMINI_MODEL_NAME, init=False)
     # Thinking tokens count against this budget, so it must leave room for the answer.
     max_output_tokens: int = 32768
     # Gemini 3 models are tuned for temperature 1.0; lower values degrade their reasoning.
@@ -190,10 +197,11 @@ class Config:
             max_retries=get_env_int("GITHUB_MAX_RETRIES", 3),
         )
 
+        warn_if_model_override_set()
+
         # Gemini configuration
         gemini_config = GeminiConfig(
             api_key=gemini_api_key,
-            model_name=get_env_str("GEMINI_MODEL", "gemini-3.8-flash"),
             temperature=get_env_float("GEMINI_TEMPERATURE", 1.0),
             top_p=get_env_float("GEMINI_TOP_P", 0.95),
             max_output_tokens=get_env_int("GEMINI_MAX_TOKENS", 32768),
@@ -312,3 +320,17 @@ class Config:
                 "enable_file_logging": self.logging.enable_file_logging,
             },
         }
+
+
+def warn_if_model_override_set() -> None:
+    """Warn that GEMINI_MODEL is deprecated and ignored; the review always runs on GEMINI_MODEL_NAME."""
+    requested_model = (os.environ.get("GEMINI_MODEL") or os.environ.get("INPUT_GEMINI_MODEL") or "").strip()
+    if not requested_model:
+        return
+    message = (
+        f"GEMINI_MODEL is deprecated and ignored (got '{requested_model}'); "
+        f"reviews always use {GEMINI_MODEL_NAME}. Remove GEMINI_MODEL from your workflow."
+    )
+    logger.warning(message)
+    # Surfaces as an annotation on the workflow run, not just in the log.
+    print(f"::warning title=GEMINI_MODEL is deprecated::{message}", flush=True)

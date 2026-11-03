@@ -56,7 +56,6 @@ class TestGeminiClient:
         """Create a valid GeminiConfig."""
         return GeminiConfig(
             api_key="AIzaSyTestKey123456",
-            model_name="gemini-pro",
             temperature=0.0,
         )
 
@@ -994,7 +993,7 @@ class TestVerifyFindings:
 
     @pytest.fixture
     def valid_config(self):
-        return GeminiConfig(api_key="AIzaSyTestKey123456", model_name="gemini-pro", temperature=0.0)
+        return GeminiConfig(api_key="AIzaSyTestKey123456", temperature=0.0)
 
     def _client_returning(self, mock_genai, valid_config, text):
         mock_model = Mock()
@@ -1046,7 +1045,7 @@ class TestRespondToReply:
 
     @pytest.fixture
     def valid_config(self):
-        return GeminiConfig(api_key="AIzaSyTestKey123456", model_name="gemini-pro", temperature=0.0)
+        return GeminiConfig(api_key="AIzaSyTestKey123456", temperature=0.0)
 
     def _client_returning(self, mock_genai, valid_config, text):
         mock_model = Mock()
