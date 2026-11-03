@@ -8,8 +8,11 @@ A GitHub Action that automatically reviews pull requests using Google's Gemini A
 ## Features
 
 - Review your PRs using the Gemini API — a full comprehensive re-review on every push, not just the first
-- Inline, line-anchored comments with a concrete fix and a severity/priority tag
-- Adversarial verify pass that drops false-positive findings before posting
+- Inline, line-anchored comments with a concrete fix and a severity tag (`[BLOCKER]`, `[MAJOR]`, `[MINOR]`, `[NIT]`)
+- Evidence rules that stop it flagging code it cannot see, or APIs it only remembers from older versions
+- Reads the repository's own conventions (`REVIEW.md`, `CLAUDE.md`, `AGENTS.md`, `GEMINI.md`,
+  `.github/copilot-instructions.md`, `CONTRIBUTING.md`) and treats them as overriding its generic standards
+- Adversarial verify pass, with the full file and repository context, that drops false-positive findings before posting
 - Replies in-thread when a human responds to one of its review comments
 
 ![Demo](assets/img/Demo.png)
@@ -68,7 +71,6 @@ jobs:
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-3.8-flash # Optional, default is `gemini-3.8-flash`
           EXCLUDE: "*.md,*.txt,package-lock.json,*.yml,*.yaml"
           SYSTEM_PROMPT: | # Optional: Custom system prompt for code reviews
             Review the code with the following guidelines:
@@ -122,7 +124,6 @@ jobs:
         with:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: gemini-3.8-flash # Optional, default is `gemini-3.8-flash`
           EXCLUDE: "*.md,*.txt,package-lock.json,*.yml,*.yaml"
           SYSTEM_PROMPT: | # Optional: Custom system prompt for code reviews
             Review the code with the following guidelines:
@@ -191,10 +192,9 @@ Example usage in workflow inputs (maps to env):
     REVIEW_PRIORITY_THRESHOLD: high
     REVIEW_MODE: lenient
 ```
-- **GEMINI_MODEL**: The Gemini model to use for code review (default: `gemini-3.8-flash`)
-  - Flash models offer speed and multimodal capabilities suited to a wide variety of tasks, including code review.
-  - Pro models offer longer context windows and stronger reasoning for complex reviews.
-  - For detailed information about available models, refer to [Gemini models](https://ai.google.dev/gemini-api/docs/models/gemini).
+- **Model**: reviews always run on `gemini-3.8-flash`, pinned by this action so every repository gets the same
+  reviewer. **`GEMINI_MODEL` is deprecated and ignored**: if it is set, the run logs a warning asking you to remove it
+  and carries on with the pinned model.
   
 - **EXCLUDE**: Comma-separated list of file patterns to exclude from review (e.g., `*.md,*.txt,package-lock.json`)
   
@@ -212,23 +212,23 @@ Example usage in workflow inputs (maps to env):
       Do not comment on minor style issues.
     ```
 
-### AI Model Precision Settings
+### AI Model Settings
 
-The action is configured for **maximum precision and deterministic output** to provide consistent, focused code reviews:
+The defaults follow Google's guidance for Gemini 3 models:
 
-- **Temperature**: `0.0` (default) - Lowest temperature for ultra-precise, deterministic responses. The model focuses on the most likely correct answers rather than exploring creative alternatives.
-- **Top P**: `0.9` (default) - Slightly lower nucleus sampling for more focused output.
-- **Max Output Tokens**: `8192` - Fully utilizes Gemini 2.5's output capacity for comprehensive reviews.
+- **Temperature**: `1.0` (default). Gemini 3 models are tuned for it; lower values can degrade their reasoning or cause looping.
+- **Top P**: `0.95` (default).
+- **Thinking level**: `high` (default). One of `low`, `medium` or `high`; more thinking means fewer false positives at higher latency.
+- **Max Output Tokens**: `32768` (default). Thinking tokens count against this budget, so it leaves room for the answer.
 
-These settings can be overridden via environment variables if you need different behavior:
+These settings can be overridden via environment variables:
 ```yaml
 env:
-  GEMINI_TEMPERATURE: "0.0"  # Range: 0.0 (deterministic) to 2.0 (creative)
-  GEMINI_TOP_P: "0.9"        # Range: 0.0 to 1.0
-  GEMINI_MAX_TOKENS: "8192"  # Maximum output tokens
+  GEMINI_TEMPERATURE: "1.0"       # Range: 0.0 to 2.0
+  GEMINI_TOP_P: "0.95"            # Range: 0.0 to 1.0
+  GEMINI_THINKING_LEVEL: "high"   # low, medium or high
+  GEMINI_MAX_TOKENS: "32768"      # Maximum output tokens, including thinking
 ```
-
-**Why these settings?** Code reviews require precision and consistency. Lower temperature ensures the AI focuses on identifying real issues rather than generating creative but potentially irrelevant suggestions.
 
 4. Commit the workflow file to your repository.
 
@@ -244,8 +244,10 @@ This GitHub Action uses the Gemini AI API to provide code review feedback. It wo
 2. **Consulting the Gemini model**: It sends chunks of the modified code to the Gemini for analysis.
 3. **Providing feedback**: Gemini AI examines the code and generates review comments.
 4. **Delivering the review**: The Action always posts a review on your pull request:
-   - If **no issues are found**, the PR is **approved** with a "Code looks good! 👍" message
-   - If **issues are found**, the review **requests changes** with detailed comments on specific lines
+   - If **no issues are found**, the PR is **approved**
+   - If **any finding is posted**, `[NIT]` included, the review **requests changes**, with one inline thread per finding
+     and a summary tallying them by severity and listing the merge blockers
+   - Reviews are anchored to the commit that was reviewed, so a push during a review never misplaces its comments
 
 ## License
 

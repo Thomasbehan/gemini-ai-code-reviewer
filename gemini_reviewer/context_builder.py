@@ -16,6 +16,17 @@ from .utils import get_file_language
 
 logger = logging.getLogger(__name__)
 
+# Files where a repository writes down its own conventions for contributors and coding agents.
+REPOSITORY_CONVENTION_FILES = (
+    "REVIEW.md",
+    "CLAUDE.md",
+    "AGENTS.md",
+    "GEMINI.md",
+    ".github/copilot-instructions.md",
+    "CONTRIBUTING.md",
+)
+REPOSITORY_CONVENTIONS_BUDGET = 16000
+
 
 class ContextBuilder:
     """Builds analysis context for code review."""
@@ -44,6 +55,7 @@ class ContextBuilder:
 
         # PR-stable context caches (reused across files in same review)
         self._cached_mental_model: str | None = None
+        self._cached_repository_conventions: str | None = None
         self._cached_repo_structure: str | None = None
         self._cached_code_signatures: str | None = None
         self._cached_config_files: list[str] | None = None
@@ -75,6 +87,7 @@ class ContextBuilder:
         self._test_file_map = {}
         self._config_files = []
         self._cached_mental_model = None
+        self._cached_repository_conventions = None
         self._cached_repo_structure = None
         self._cached_code_signatures = None
         self._cached_config_files = None
@@ -810,6 +823,38 @@ class ContextBuilder:
     # PR-stable helpers
     # ------------------------------------------------------------------
 
+    def _load_repository_conventions(self) -> str:
+        """Load the repository's own contributor/agent guidance files (cached)."""
+        if self._cached_repository_conventions is not None:
+            return self._cached_repository_conventions
+
+        repository_root = os.getcwd()
+        parts = []
+        remaining_budget = REPOSITORY_CONVENTIONS_BUDGET
+        for convention_file in REPOSITORY_CONVENTION_FILES:
+            convention_path = os.path.join(repository_root, convention_file)
+            if remaining_budget <= 0 or not os.path.isfile(convention_path):
+                continue
+            try:
+                with open(convention_path, encoding="utf-8", errors="ignore") as handle:
+                    content = handle.read().strip()
+            except OSError as error:
+                logger.debug(f"Could not read {convention_file}: {error}")
+                continue
+            if len(content) > remaining_budget:
+                content = content[:remaining_budget] + "\n... (truncated)"
+            remaining_budget -= len(content)
+            parts.append(f"#### {convention_file}\n{content}\n")
+
+        self._cached_repository_conventions = ""
+        if parts:
+            self._cached_repository_conventions = (
+                "### Repository Conventions (authoritative)\n"
+                "These are this repository's own written rules. Where they differ from the generic review "
+                "standards, these win. Never flag code for following them.\n\n" + "\n".join(parts)
+            )
+        return self._cached_repository_conventions
+
     def _build_repo_mental_model(self) -> str:
         """Build a compact repo-level mental model with key information (cached)."""
         if self._cached_mental_model is not None:
@@ -1181,6 +1226,11 @@ class ContextBuilder:
                     )
             except Exception:
                 pass
+
+            # SECTION: The repository's own written conventions (PR-stable, cached)
+            repository_conventions = self._load_repository_conventions()
+            if repository_conventions:
+                sections.append({"content": repository_conventions, "priority": 0.95, "name": "repository_conventions"})
 
             # SECTION: Related file contents (forward dependencies)
             if related_files:

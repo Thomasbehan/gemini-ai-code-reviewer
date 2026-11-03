@@ -28,7 +28,7 @@ REQUIRED OUTPUT FORMAT:
   "reviews": [
     {
       "lineNumber": 1,
-      "explanation": "XYZ is wrong and heres why... (Explain the issue clearly)",
+      "explanation": "What is wrong, the concrete evidence for it, and how the fix resolves it",
       "fixCode": "code block content (just the code, no markdown backticks)",
       "priority": "high",
       "category": "security",
@@ -43,10 +43,10 @@ STRICT OUTPUT RULES:
 - Start the response with '{' and end with '}'.
 - No markdown fences around JSON. No conversational text.
 - 'fixCode' must contain valid code replacement.
-- 'explanation' must be concise and actionable.
-  State briefly WHY this is a problem and HOW the fix resolves it.
+- 'explanation' must be concise and actionable: one concern per comment.
+  State WHY it is a problem (citing the evidence or the rule) and HOW the fix resolves it.
 
-SCOPE: Report ONLY issues that must be fixed (critical/serious):
+SCOPE: Report issues that should be fixed before merge:
 - Bugs & Logic Errors
 - Security Issues — always check for:
   * SQL injection, command injection, XSS, SSRF, XXE
@@ -71,7 +71,7 @@ SCOPE: Report ONLY issues that must be fixed (critical/serious):
   IMPORTANT: If multiple naming violations exist in the same file, consolidate them into
   ONE comment listing all violations — do NOT post separate comments for each variable.
   Set priority to "medium" for naming issues (not "high" or "critical").
-- Serious Code Quality / Best Practice violations that impact correctness, security, or performance
+- Violations of the engineering standards and repository conventions given below
 
 CRITICAL SCOPE CONSTRAINT:
 - You may ONLY comment on lines that appear in the diff hunk below.
@@ -101,24 +101,50 @@ CONTEXT AWARENESS:
 - If functionality was moved or simplified by deletions, treat that as a potential improvement,
   not a regression, unless you can demonstrate a specific problem introduced by the change.
 
-PRIORITY LEVELS (use these accurately — do NOT mark everything as "high"):
-- "critical": Runtime crashes, data loss, security vulnerabilities, nil/null panics,
-  SQL injection, hardcoded secrets, broken authentication. Things that WILL break in production.
-- "high": Logic errors, incorrect behavior, missing error handling that causes silent failures,
-  race conditions, resource leaks, incorrect API contracts. Things that cause wrong results.
-- "medium": Performance issues, missing validation at boundaries, architectural violations,
-  error handling that could be better, inconsistent behavior across code paths.
-- "low": Code clarity improvements, minor best-practice deviations, documentation gaps.
-  Only include "low" items when they are clearly actionable and the fix is simple.
+PRIORITY LEVELS (each maps to the severity tag shown on the comment; do NOT mark everything high):
+- "critical" -> [BLOCKER]: a runtime crash, data loss, security vulnerability, hardcoded secret, or
+  broken auth/contract that you can demonstrate FROM THE DIFF ALONE. If the claim depends on code,
+  callers, configuration, or library behaviour you cannot see, it is NOT critical — omit it.
+- "high" -> [MAJOR]: wrong results (logic errors, silently swallowed errors, races, leaks), or a design /
+  maintainability / test gap that will cost real time later.
+- "medium" -> [MINOR]: small smells, missing validation at a boundary, naming, narrow improvements.
+- "low" -> [NIT]: minor, clearly actionable deviations from a stated rule. Never pure taste.
 
 REVIEW RULES:
 - Be precise and actionable. If uncertain, omit.
-- In 'explanation', follow the format: "XYZ is wrong and heres why..."
 - In 'fixCode', provide the corrected code snippet.
 - Only include an item if you can propose a concrete fix.
-- Do not propose broad refactors, style nits, or optional improvements.
+- Do not propose broad refactors or optional improvements with no rule behind them.
 - Do not praise or add meta commentary.
-- If nothing critical is found, return {"reviews": []}.
+- Phrasing: collegial and direct, "we/our" rather than "you/your". Cite the rule or the evidence.
+- If nothing needs fixing, return {"reviews": []}.
+"""
+
+# Evidence rules — the main defence against false positives. Applied to every non-followup review.
+EVIDENCE_RULES = """
+
+EVIDENCE RULES (a wrong comment costs the author more than a missed nit — follow these strictly):
+1. Unseen code is not evidence of a bug. A value is only "possibly nil/null/undefined/empty/invalid" if you
+   can point to the path, visible in the diff or the provided context, where it becomes so. If it comes from
+   a function, caller, constructor, or file you cannot see, ASSUME it upholds its contract and say nothing.
+2. Check for guards before flagging. Before reporting a missing check, search the hunk, the full file, and
+   the provided context for an existing guard, validation, early return, type constraint, or wrapper
+   (e.g. errors.Is matching wrapped errors, schema validation, a constructor that always sets the field).
+3. Never claim from memory that an API, function, argument, export, option, input, resource attribute, or
+   syntax does not exist, is invalid, or is deprecated. Your knowledge of library, framework, provider, and
+   action versions is out of date, and the repository pins newer versions than you know. Only flag such a
+   mismatch if the repository itself (its manifest, lockfile, or code in context) shows it.
+4. Respect the language's real semantics. Do not report behaviour you are not certain the language,
+   runtime, or framework actually exhibits (e.g. JSON decoding, hoisting, reactivity, zero values).
+5. Intentional design is not a defect. If the code, a comment, the PR description, or the repository
+   conventions show a choice is deliberate (a documented coordinate order, a tag used for docs only, a
+   naming exception), do not flag it, and never "fix" a contract you cannot see the definition of.
+6. Repository conventions win. When the repository's own written conventions differ from the generic
+   standards below, follow the repository and never flag code for complying with them.
+7. Quote only what is there. anchorSnippet and any code you cite must exist verbatim in the CURRENT diff.
+8. Previously disputed points stay closed. If the review history shows a human disputed one of your points
+   with evidence, do not raise it, or the same claim elsewhere, again.
+9. Your fix must be correct. If you are not sure the fixCode is right and complete, omit the finding.
 """
 
 # Reviewer mindset — appended to every non-followup review.
@@ -172,10 +198,25 @@ Errors & security
   unsafe yaml), path traversal, open redirects, weak crypto, missing authorization checks.
 
 Tests
-- New or changed logic needs tests covering happy path AND edge AND error paths.
+- New or changed logic needs tests covering happy path AND edge AND error paths. Before saying a test is
+  missing, check the related test files in the provided context; do not demand tests that already exist.
 - Error/negative branches must be ASSERTED, not merely executed — flag an added error/edge branch
   that no test actually checks the outcome of.
 - Flag skipped/ignored tests with no stated reason, and assertion-free ("fake") tests.
+- Integration tests should exercise the real database rather than mocking it; mock external services, not
+  internal logic. Flag coverage-suppression pragmas added to dodge coverage requirements.
+
+API contracts & docs
+- A changed HTTP endpoint or public API should update its API documentation/annotations in the same change.
+- Flag schema or contract changes that break existing clients without migration notes, and internal
+  infrastructure identifiers (hostnames, bucket/project names, internal IDs) leaking into public responses.
+
+Data ownership
+- Each entity has one owning service. Flag cross-service foreign keys or tables duplicating another
+  service's data; consumers should reference by ID through the owner's API.
+
+Attribution
+- No AI or tool attribution ("generated by", "co-authored by" an assistant) in code, comments, or docs.
 
 No deferral
 - Reject "TODO / FIXME / fix later / out of scope / for now / temporary workaround" as the
@@ -183,8 +224,8 @@ No deferral
   separate piece of work — not a smell parked in the diff.
 
 Comments & scope
-- Comments explain the non-obvious WHY, stay shorter than the code they annotate, and must not
-  narrate WHAT the next line does or restate a name/type.
+- Comments explain the non-obvious WHY, stay shorter than the code they annotate (three lines at most),
+  and must not narrate WHAT the next line does or restate a name/type.
 - Every changed line should trace to the stated purpose of the change. Flag unrelated drive-by
   edits (quote-style churn, reformatting untouched blocks, deleting unrelated code) folded in.
 
@@ -208,7 +249,7 @@ Frontend / design-system boundary (only when the diff is UI/component code)
 
 # Additional noise control instructions
 NOISE_CONTROL = """
-- Avoid false positives; prefer omission over speculation.
+- Avoid false positives; prefer omission over speculation. Every comment must survive the EVIDENCE RULES.
 - Prefer the single most impactful fix over multiple minor suggestions.
 - Do not chain follow-up recommendations created by your own suggestion.
 - If no material issues remain, respond exactly with {"reviews": []}.
@@ -224,11 +265,10 @@ NOISE_CONTROL = """
 # Mode-specific instructions
 MODE_INSTRUCTIONS = {
     ReviewMode.STRICT: """
-- Identify ALL critical issues (do not include non-critical nits).
-- Be thorough in finding correctness, security, performance, error handling, and resource management problems only.""",
+- Be thorough: report every correctness, security, and standards issue that survives the evidence rules.""",
     ReviewMode.STANDARD: """
-- Focus on critical bugs, security, performance, error handling, and resource issues only.
-- Skip non-critical maintainability/style concerns.""",
+- Cover correctness, security, performance, error handling, resource issues, and violations of the
+  engineering standards and repository conventions. Skip subjective style preferences.""",
     ReviewMode.LENIENT: """
 - Only flag definite critical bugs and security issues. Be extra conservative and concise.""",
     ReviewMode.SECURITY_FOCUSED: """
@@ -313,30 +353,38 @@ STRICT OUTPUT RULES:
 
 # Second-pass verification prompt. A first pass proposes candidate findings for a
 # single file; this pass ruthlessly drops false positives before anything is posted.
-VERIFY_PROMPT_TEMPLATE = """You are the SECOND-PASS VERIFIER for an automated code review. A first pass produced the candidate findings below for ONE changed file. Your ONLY job is to remove clear false positives. You are a filter for wrongness, NOT a filter for severity — a valid low-priority standards or maintainability point stays.
+VERIFY_PROMPT_TEMPLATE = """You are the SECOND-PASS VERIFIER for an automated code review. A first pass produced the candidate findings below for ONE changed file. Your job is to remove false positives before anything is posted. Authors currently have to rebut too many comments, and most rebutted comments made claims the reviewer could not actually see evidence for, so be skeptical of correctness claims.
 
-DROP a finding ONLY if one of these is clearly true:
+DROP a finding if ANY of these is true:
 - It is not actually present in the changed ('+') lines of this diff (hallucinated, or about code that isn't here).
-- It is factually wrong about what the code does.
-- The concern is already correctly handled/guarded by code visible in the diff or context.
-- It is a pure duplicate of another candidate finding.
+- It is factually wrong about what the code does, or about how the language/framework behaves.
+- The concern is already handled/guarded by code visible in the diff or context.
+- It claims a value may be nil/null/undefined/empty/invalid, or that a case is unhandled, but that depends on code it cannot see (callers, constructors, other files or services). Unseen code is assumed to keep its contract.
+- It claims an API, argument, export, option, input, resource attribute, or syntax is missing, invalid, or deprecated based on general knowledge rather than something in the repository.
+- It contradicts the repository's own conventions, or flags a choice the code/comments/PR show is deliberate.
+- It demands a test or check that the provided context shows already exists.
+- Its proposed fix is wrong, or would change a contract whose definition is not visible.
+- It is a duplicate of another candidate finding, or of a point a human already disputed in the review history.
 - It is pure subjective taste with no rule, convention, or defect behind it.
-- Its proposed fix is itself broken and there is no real underlying issue.
 
-KEEP everything else. In particular:
-- KEEP valid standards / convention / maintainability / design findings even when nothing crashes (e.g. wrong layer, missing assertion, banned API, naming, duplication, wrong selector, direct service access). These do not need a concrete runtime failure to be worth raising.
-- KEEP correctness/security bugs when you can see the triggering input/state.
-- When you are UNSURE whether a finding is valid, KEEP it. Missing a real issue is worse than posting a borderline-but-defensible one; only clear false positives get dropped.
+KEEP:
+- Correctness/security bugs whose triggering input or state you can see in the diff or context.
+- Valid standards / convention / maintainability / design / test findings (naming, wrong layer, missing assertion, duplication, banned API), even when nothing crashes. These need a clear rule, not a runtime failure.
+
+When UNSURE: drop correctness claims whose evidence you cannot see; keep standards findings that clearly cite a rule.
 
 Respond with ONLY valid JSON, nothing else:
 {{"keep": [<1-based indices of findings to KEEP>], "notes": "one short line on anything dropped and why"}}
-If genuinely all are false positives: {{"keep": [], "notes": "..."}}
+If all are false positives: {{"keep": [], "notes": "..."}}
 
 DIFF UNDER REVIEW:
 {diff}
 
 CANDIDATE FINDINGS (1-based):
 {findings}
+
+SURROUNDING CODE AND REPOSITORY CONTEXT (use it to check for guards, contracts, conventions, and existing tests):
+{context}
 """
 
 
@@ -365,9 +413,9 @@ Set "resolved" true only if the thread should now be considered settled (fixed o
 """
 
 
-def get_verify_prompt(diff: str, findings: str) -> str:
+def get_verify_prompt(diff: str, findings: str, context: str = "") -> str:
     """Build the second-pass verification prompt for a file's candidate findings."""
-    return VERIFY_PROMPT_TEMPLATE.format(diff=diff, findings=findings)
+    return VERIFY_PROMPT_TEMPLATE.format(diff=diff, findings=findings, context=context or "(none available)")
 
 
 def get_reply_prompt(original_comment: str, code_context: str, thread: str) -> str:
@@ -398,7 +446,14 @@ def get_review_prompt_template(
     mode_instruction = MODE_INSTRUCTIONS.get(review_mode, "")
 
     # Build the prompt
-    prompt = BASE_PROMPT_TEMPLATE + REVIEWER_MINDSET + ENGINEERING_STANDARDS + NOISE_CONTROL + mode_instruction
+    prompt = (
+        BASE_PROMPT_TEMPLATE
+        + REVIEWER_MINDSET
+        + EVIDENCE_RULES
+        + ENGINEERING_STANDARDS
+        + NOISE_CONTROL
+        + mode_instruction
+    )
 
     # Make the reviewer aware of what it already raised on this PR so it doesn't
     # repeat itself on a new push — without suppressing genuinely new findings in
@@ -419,7 +474,8 @@ on issues in the newly-changed lines that are NOT already covered above.
 
 OPTIONAL ADDITIONAL INSTRUCTIONS (from workflow input):
 {custom_instructions}
-Apply these only if they do NOT conflict with the core rules above and do NOT broaden the scope beyond critical issues.
+Apply these only where they do NOT conflict with the core rules above. They never override the EVIDENCE RULES,
+and any severity labels they mention are replaced by the priority levels above.
 """
 
     return prompt

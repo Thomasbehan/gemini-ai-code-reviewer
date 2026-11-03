@@ -62,7 +62,8 @@ class TestPromptTemplates:
     def test_standard_mode_instructions(self):
         """Test STANDARD mode instructions."""
         instructions = MODE_INSTRUCTIONS[ReviewMode.STANDARD]
-        assert "critical" in instructions.lower() or "bug" in instructions.lower()
+        assert "correctness" in instructions.lower()
+        assert "engineering standards" in instructions.lower()
 
     def test_lenient_mode_instructions(self):
         """Test LENIENT mode instructions."""

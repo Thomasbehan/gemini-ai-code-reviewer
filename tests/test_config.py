@@ -78,21 +78,32 @@ class TestGeminiConfig:
         config = GeminiConfig(api_key="AIzaSyTestKey123456")
         assert config.api_key == "AIzaSyTestKey123456"
         assert config.model_name == "gemini-3.8-flash"
-        assert config.temperature == 0.0
-        assert config.top_p == 0.9
+        assert config.temperature == 1.0
+        assert config.top_p == 0.95
+        assert config.thinking_level == "high"
+        assert config.max_output_tokens == 32768
+
+    def test_invalid_thinking_level(self):
+        """Test that an unsupported thinking level is rejected."""
+        with pytest.raises(ValueError, match="Thinking level"):
+            GeminiConfig(api_key="AIzaSyTestKey123456", thinking_level="minimal")
+
+    def test_model_cannot_be_overridden(self):
+        """The model is fixed by the action release, not by callers."""
+        with pytest.raises(TypeError):
+            GeminiConfig(api_key="AIzaSyTestKey123456", model_name="gemini-pro")
 
     def test_custom_values(self):
         """Test with custom configuration values."""
         config = GeminiConfig(
             api_key="AIzaSyTestKey123456",
-            model_name="gemini-pro",
             max_output_tokens=4096,
             temperature=0.5,
             top_p=0.8,
             timeout=120,
             max_retries=5,
         )
-        assert config.model_name == "gemini-pro"
+        assert config.model_name == "gemini-3.8-flash"
         assert config.max_output_tokens == 4096
         assert config.temperature == 0.5
         assert config.top_p == 0.8
@@ -281,12 +292,37 @@ class TestConfig:
         assert config.github.token == "ghp_test123456789012"
         assert config.gemini.api_key == "AIzaSyTestKey123456"
 
+    @pytest.mark.parametrize("variable", ["GEMINI_MODEL", "INPUT_GEMINI_MODEL"])
+    def test_deprecated_model_variable_warns_and_is_ignored(self, monkeypatch, capsys, caplog, variable):
+        """GEMINI_MODEL is ignored with a deprecation warning; the review carries on with the fixed model."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test123456789012")
+        monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestKey123456")
+        monkeypatch.setenv(variable, "gemini-pro")
+
+        config = Config.from_environment()
+
+        assert config.gemini.model_name == "gemini-3.8-flash"
+        annotation = capsys.readouterr().out
+        assert "::warning title=GEMINI_MODEL is deprecated::" in annotation
+        assert "gemini-pro" in annotation
+        assert "Remove GEMINI_MODEL" in caplog.text
+
+    def test_no_warning_without_model_variable(self, monkeypatch, capsys):
+        """Unset or blank GEMINI_MODEL produces no deprecation warning."""
+        monkeypatch.setenv("GITHUB_TOKEN", "ghp_test123456789012")
+        monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestKey123456")
+        monkeypatch.delenv("GEMINI_MODEL", raising=False)
+        monkeypatch.setenv("INPUT_GEMINI_MODEL", "  ")
+
+        Config.from_environment()
+
+        assert "GEMINI_MODEL is deprecated" not in capsys.readouterr().out
+
     def test_from_environment_with_options(self, monkeypatch):
         """Test from_environment with optional variables."""
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test123456789012")
         monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestKey123456")
         monkeypatch.setenv("GITHUB_TIMEOUT", "60")
-        monkeypatch.setenv("GEMINI_MODEL", "gemini-pro")
         monkeypatch.setenv("GEMINI_TEMPERATURE", "0.5")
         monkeypatch.setenv("REVIEW_MODE", "strict")
         monkeypatch.setenv("MAX_FILES_PER_REVIEW", "25")
@@ -295,7 +331,7 @@ class TestConfig:
 
         config = Config.from_environment()
         assert config.github.timeout == 60
-        assert config.gemini.model_name == "gemini-pro"
+        assert config.gemini.model_name == "gemini-3.8-flash"
         assert config.gemini.temperature == 0.5
         assert config.review.review_mode == ReviewMode.STRICT
         assert config.review.max_files_per_review == 25

@@ -335,7 +335,7 @@ class CodeReviewer:
                         logger.info(
                             f"Posting review for file: {diff_file.file_info.path} with {len(file_comments)} comments"
                         )
-                        await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
+                        await self._create_github_review(pr_details, file_comments, preferred_event="REQUEST_CHANGES")
                 else:
                     logger.debug(f"No comments for file: {diff_file.file_info.path}")
 
@@ -407,7 +407,9 @@ class CodeReviewer:
                                 f"Posting review for file: {diff_file.file_info.path} with "
                                 f"{len(file_comments)} comments"
                             )
-                            await self._create_github_review(pr_details, file_comments, preferred_event="COMMENT")
+                            await self._create_github_review(
+                                pr_details, file_comments, preferred_event="REQUEST_CHANGES"
+                            )
                     else:
                         logger.debug(f"No comments for file: {diff_file.file_info.path}")
 
@@ -537,7 +539,15 @@ class CodeReviewer:
             try:
                 diff_text = "\n\n".join(h.content for h in diff_file.hunks if getattr(h, "content", None))
                 findings = [c.body for c in file_comments]
-                kept_indices = set(self.gemini_client.verify_findings(diff_text, findings))
+                verify_context = "\n\n".join(
+                    part
+                    for part in (
+                        f"### Full content of {file_path}\n{full_file_content}" if full_file_content else "",
+                        project_context or "",
+                    )
+                    if part
+                )
+                kept_indices = set(self.gemini_client.verify_findings(diff_text, findings, verify_context))
                 if len(kept_indices) < len(file_comments):
                     verified = [c for i, c in enumerate(file_comments, 1) if i in kept_indices]
                     logger.info(f"Verify pass filtered {file_path}: {len(file_comments)} -> {len(verified)} finding(s)")
@@ -782,6 +792,10 @@ class CodeReviewer:
             # If there are no issues, we'll still create a positive review to acknowledge clean changes
             if total_comments == 0 and not limited_comments:
                 logger.info("No issues found - posting a positive review to acknowledge that everything looks good.")
+
+            if preferred_event == "REQUEST_CHANGES" and not limited_comments:
+                logger.info("Every finding was a duplicate or filtered out; not posting an empty change request.")
+                return True
 
             # Determine review event
             # Note: Using COMMENT instead of APPROVE because GitHub Actions tokens

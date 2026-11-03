@@ -9,8 +9,14 @@ import logging
 
 from .config import ReviewConfig
 from .models import DiffFile, HunkInfo, ReviewComment, ReviewPriority
+from .utils import strip_leading_tags
 
 logger = logging.getLogger(__name__)
+
+
+def tag_with_severity(body: str, priority: ReviewPriority) -> str:
+    """Prefix a comment body with its severity tag, replacing any tags the model wrote itself."""
+    return f"{priority.severity_tag} {strip_leading_tags(body)}"
 
 
 class CommentProcessor:
@@ -147,6 +153,8 @@ class CommentProcessor:
 
             # Format the body with fix code if available
             body = ai_response.review_comment
+            if ai_response.category != "followup":
+                body = tag_with_severity(body, ai_response.priority)
             fix_code = getattr(ai_response, "fix_code", None)
 
             if fix_code:

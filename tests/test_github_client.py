@@ -2593,11 +2593,12 @@ class TestGitHubClientExistingBotComments:
         summary = client._generate_review_summary(comments)
 
         assert "Gemini AI Code Review" in summary
-        assert "Key findings:" in summary
-        assert "secrets.py" in summary
-        assert "api.go" in summary
-        # Low priority should not appear in key findings
-        assert "Minor style" not in summary.split("Key findings:")[1] if "Key findings:" in summary else True
+        assert "[BLOCKER] 1 · [MAJOR] 1 · [NIT] 1" in summary
+        blockers = summary.split("Blockers to merge")[1]
+        assert "secrets.py" in blockers
+        assert "api.go" in blockers
+        # Low priority findings are tallied but are not merge blockers
+        assert "Minor style" not in blockers
 
     @patch("gemini_reviewer.github_client.Github")
     @patch("gemini_reviewer.github_client.requests.Session")
