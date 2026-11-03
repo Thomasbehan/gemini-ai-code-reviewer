@@ -17,6 +17,19 @@ class ReviewPriority(Enum):
     HIGH = "high"
     CRITICAL = "critical"
 
+    @property
+    def severity_tag(self) -> str:
+        """The review severity tag shown on comments at this priority."""
+        return SEVERITY_TAGS[self]
+
+
+SEVERITY_TAGS = {
+    ReviewPriority.CRITICAL: "[BLOCKER]",
+    ReviewPriority.HIGH: "[MAJOR]",
+    ReviewPriority.MEDIUM: "[MINOR]",
+    ReviewPriority.LOW: "[NIT]",
+}
+
 
 class ReviewFocus(Enum):
     """Focus areas for code review."""

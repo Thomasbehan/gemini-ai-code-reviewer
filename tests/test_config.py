@@ -78,8 +78,15 @@ class TestGeminiConfig:
         config = GeminiConfig(api_key="AIzaSyTestKey123456")
         assert config.api_key == "AIzaSyTestKey123456"
         assert config.model_name == "gemini-3.8-flash"
-        assert config.temperature == 0.0
-        assert config.top_p == 0.9
+        assert config.temperature == 1.0
+        assert config.top_p == 0.95
+        assert config.thinking_level == "high"
+        assert config.max_output_tokens == 32768
+
+    def test_invalid_thinking_level(self):
+        """Test that an unsupported thinking level is rejected."""
+        with pytest.raises(ValueError, match="Thinking level"):
+            GeminiConfig(api_key="AIzaSyTestKey123456", thinking_level="minimal")
 
     def test_custom_values(self):
         """Test with custom configuration values."""

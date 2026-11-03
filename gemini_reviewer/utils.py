@@ -8,6 +8,14 @@ to follow DRY principles.
 import fnmatch
 import re
 
+# Bracketed labels such as "[SECURITY]" or "**[BLOCKER]**" at the start of a comment.
+LEADING_TAGS_PATTERN = re.compile(r"^\s*(?:\*{0,2}\[[A-Z][A-Z_ -]*\]\*{0,2}\s*)+")
+
+
+def strip_leading_tags(text: str | None) -> str:
+    """Remove bracketed severity/category labels from the start of a comment body."""
+    return LEADING_TAGS_PATTERN.sub("", text or "", count=1)
+
 
 def matches_pattern(file_path: str, pattern: str) -> bool:
     """Check if file path matches a pattern.

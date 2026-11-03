@@ -10,7 +10,8 @@ import logging
 import re
 from typing import Any, Optional
 
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from .config import GeminiConfig, ReviewConfig
@@ -18,6 +19,20 @@ from .models import AIResponse, AnalysisContext, HunkInfo, ReviewPriority
 from .utils import get_file_language, sanitize_code_content, sanitize_text
 
 logger = logging.getLogger(__name__)
+
+FILTERED_FINISH_REASONS = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII"}
+
+
+def _finish_reason_name(finish_reason: Any) -> str | None:
+    """Normalise a finish reason (SDK enum, enum name or raw proto number) to its name."""
+    if finish_reason is None:
+        return None
+    if isinstance(finish_reason, int) and not isinstance(finish_reason, bool):
+        try:
+            return list(types.FinishReason)[finish_reason].name
+        except IndexError:
+            return str(finish_reason)
+    return str(getattr(finish_reason, "name", finish_reason)).upper()
 
 
 class GeminiClientError(Exception):
@@ -47,20 +62,21 @@ class GeminiClient:
         self.review_config = review_config
 
         try:
-            genai.configure(api_key=config.api_key)
-            self._model = genai.GenerativeModel(config.model_name)
+            self._client = genai.Client(api_key=config.api_key)
+            self._model = self._client.models
             logger.info(f"Initialized Gemini client with model: {config.model_name}")
         except Exception as e:
             logger.error(f"Failed to initialize Gemini client: {str(e)}")
             raise GeminiClientError(f"Failed to initialize Gemini client: {str(e)}")
 
-        self._generation_config = {
-            "max_output_tokens": config.max_output_tokens,
-            "temperature": config.temperature,
-            "top_p": config.top_p,
+        self._generation_config = types.GenerateContentConfig(
+            max_output_tokens=config.max_output_tokens,
+            temperature=config.temperature,
+            top_p=config.top_p,
             # Force the model to emit JSON only, reducing chances of conversational wrappers
-            "response_mime_type": "application/json",
-        }
+            response_mime_type="application/json",
+            thinking_config=types.ThinkingConfig(thinking_level=config.thinking_level),
+        )
 
         # Statistics tracking
         self._total_requests = 0
@@ -117,9 +133,9 @@ class GeminiClient:
             logger.error(f"Error analyzing code hunk: {str(e)}")
             raise
 
-    def verify_findings(self, diff_text: str, findings: list[str]) -> list[int]:
-        """Adversarial second pass: given a file's diff and the candidate findings,
-        return the 1-based indices of the findings that survive verification.
+    def verify_findings(self, diff_text: str, findings: list[str], context_text: str = "") -> list[int]:
+        """Adversarial second pass: given a file's diff, its surrounding context and the candidate
+        findings, return the 1-based indices of the findings that survive verification.
 
         Fails OPEN (keeps all findings) on any error, so a verifier hiccup never
         silently drops real review comments.
@@ -133,7 +149,12 @@ class GeminiClient:
             return all_indices
         try:
             numbered = "\n".join(f"{i}. {f}" for i, f in enumerate(findings, 1))
-            prompt = get_verify_prompt(diff_text, numbered)
+            # Context goes last in the prompt, so cap it to leave the diff and findings intact.
+            fixed_length = len(get_verify_prompt(diff_text, numbered))
+            context_budget = max(0, self.config.max_prompt_length - fixed_length)
+            if len(context_text) > context_budget:
+                context_text = context_text[:context_budget] + "\n...[truncated]"
+            prompt = get_verify_prompt(diff_text, numbered, context_text)
             if len(prompt) > self.config.max_prompt_length:
                 prompt = prompt[: self.config.max_prompt_length] + "\n...[truncated]"
             response = self._generate_content_with_validation(prompt)
@@ -178,22 +199,22 @@ class GeminiClient:
         logger.info("Sending request to Gemini API...")
 
         try:
-            response = self._model.generate_content(prompt, generation_config=self._generation_config)
+            response = self._model.generate_content(
+                model=self.config.model_name, contents=prompt, config=self._generation_config
+            )
 
             if not response:
                 raise GeminiClientError("Empty response from Gemini API")
 
             # Check if response has valid parts before accessing text
-            # finish_reason values: 1=STOP (normal), 2=MAX_TOKENS, 3=SAFETY, 4=RECITATION, 5=OTHER
             if hasattr(response, "candidates") and response.candidates:
                 candidate = response.candidates[0]
-                finish_reason = getattr(candidate, "finish_reason", None)
+                finish_reason = _finish_reason_name(getattr(candidate, "finish_reason", None))
 
                 # If content was filtered (safety/recitation), return empty result with warning
-                if finish_reason in [3, 4]:  # SAFETY or RECITATION
-                    reason_name = "SAFETY" if finish_reason == 3 else "RECITATION"
+                if finish_reason in FILTERED_FINISH_REASONS:
                     logger.warning(
-                        f"Gemini API response filtered due to {reason_name} settings (finish_reason={finish_reason}). "
+                        f"Gemini API response filtered due to {finish_reason} settings. "
                         "This is expected for some code patterns and does not indicate an error. "
                         "Returning empty review for this hunk."
                     )
@@ -201,7 +222,7 @@ class GeminiClient:
 
                 # If response was truncated (MAX_TOKENS), log warning but let partial text through
                 # so existing recovery logic (_recover_json_list_from_objects, _repair_truncated_json) can handle it
-                if finish_reason == 2:  # MAX_TOKENS
+                if finish_reason == "MAX_TOKENS":
                     logger.warning("Response truncated due to max_output_tokens limit — attempting partial parse")
 
                 # Check if there are valid parts in the response
@@ -216,7 +237,7 @@ class GeminiClient:
                 logger.warning("Response object has no text attribute. Returning empty review.")
                 return "[]"
 
-            response_text = response.text.strip()
+            response_text = (response.text or "").strip()
             if not response_text:
                 logger.warning("Empty response text from Gemini API. Returning empty review.")
                 return "[]"
@@ -953,8 +974,8 @@ class GeminiClient:
         """Test connection to Gemini API."""
         try:
             test_prompt = "Respond with 'OK' if you can read this message."
-            response = self._model.generate_content(test_prompt)
-            return response and hasattr(response, "text") and response.text.strip()
+            response = self._model.generate_content(model=self.config.model_name, contents=test_prompt)
+            return bool(response and (getattr(response, "text", None) or "").strip())
         except Exception as e:
             logger.error(f"Connection test failed: {str(e)}")
             return False

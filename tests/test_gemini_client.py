@@ -87,12 +87,11 @@ class TestGeminiClient:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_init(self, mock_genai, valid_config):
         """Test GeminiClient initialization."""
-        mock_genai.configure = Mock()
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
 
         client = GeminiClient(valid_config)
 
-        mock_genai.configure.assert_called_once_with(api_key=valid_config.api_key)
+        mock_genai.Client.assert_called_once_with(api_key=valid_config.api_key)
         assert client.config == valid_config
 
     @patch("gemini_reviewer.gemini_client.genai")
@@ -104,7 +103,7 @@ class TestGeminiClient:
         # Set up candidates properly so the code doesn't fail
         mock_response.candidates = None  # No candidates = skip that check
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         result = client.test_connection()
@@ -117,7 +116,7 @@ class TestGeminiClient:
         """Test failed connection test."""
         mock_model = Mock()
         mock_model.generate_content.side_effect = Exception("Connection failed")
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         result = client.test_connection()
@@ -144,7 +143,7 @@ class TestGeminiClient:
         # Set up response to not have candidates to skip that check path
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         prompt = "Review this code"
@@ -161,7 +160,7 @@ class TestGeminiClient:
         mock_response.text = json.dumps({"reviews": []})
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
 
@@ -177,7 +176,7 @@ class TestGeminiClient:
         mock_response.text = "Not valid JSON"
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
 
@@ -188,7 +187,7 @@ class TestGeminiClient:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_get_statistics(self, mock_genai, valid_config):
         """Test getting client statistics."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
 
         client = GeminiClient(valid_config)
         stats = client.get_statistics()
@@ -200,7 +199,7 @@ class TestGeminiClient:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_close(self, mock_genai, valid_config):
         """Test client cleanup."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
 
         client = GeminiClient(valid_config)
         client.close()  # Should not raise
@@ -217,7 +216,7 @@ class TestJSONParsing:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_parse_valid_json_with_code_blocks(self, mock_genai, valid_config):
         """Test parsing JSON wrapped in markdown code blocks."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         response_text = """
@@ -236,7 +235,7 @@ class TestJSONParsing:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_parse_truncated_json(self, mock_genai, valid_config):
         """Test parsing truncated JSON response."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         truncated_json = '{"reviews": [{"lineNumber": 1, "reviewComment": "Test"'
@@ -248,7 +247,7 @@ class TestJSONParsing:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_extract_json_from_text(self, mock_genai, valid_config):
         """Test extracting JSON from mixed text."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         mixed_text = """
@@ -265,7 +264,7 @@ That's all!
     @patch("gemini_reviewer.gemini_client.genai")
     def test_repair_json(self, mock_genai, valid_config):
         """Test JSON repair functionality."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         broken_json = '{"reviews": [{"lineNumber": 1, "reviewComment": "Test"'
@@ -286,7 +285,7 @@ class TestAIResponseConversion:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_convert_valid_response(self, mock_genai, valid_config):
         """Test converting valid response data."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         response_data = {
@@ -307,7 +306,7 @@ class TestAIResponseConversion:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_convert_minimal_response(self, mock_genai, valid_config):
         """Test converting minimal response data."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         response_data = {
@@ -324,7 +323,7 @@ class TestAIResponseConversion:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_convert_invalid_response(self, mock_genai, valid_config):
         """Test converting invalid response data."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         # Missing required fields
@@ -337,7 +336,7 @@ class TestAIResponseConversion:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_convert_with_fix_code(self, mock_genai, valid_config):
         """Test converting response with fix code."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         response_data = {
@@ -388,7 +387,7 @@ class TestPromptBuilding:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_build_prompt(self, mock_genai, valid_config, sample_hunk, sample_context):
         """Test building the analysis prompt."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         prompt = client._create_analysis_prompt(sample_hunk, sample_context, "Review template")
@@ -399,7 +398,7 @@ class TestPromptBuilding:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_build_prompt_with_full_file(self, mock_genai, valid_config, sample_hunk):
         """Test building prompt with full file content."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         pr = PRDetails("owner", "repo", 1, "Title", "Desc")
@@ -418,7 +417,7 @@ class TestPromptBuilding:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_build_prompt_with_related_files(self, mock_genai, valid_config, sample_hunk):
         """Test building prompt with related files."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         pr = PRDetails("owner", "repo", 1, "Title", "Desc")
@@ -469,7 +468,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_init_failure(self, mock_genai, valid_config):
         """Test handling initialization failure."""
-        mock_genai.configure.side_effect = Exception("API key invalid")
+        mock_genai.Client.side_effect = Exception("API key invalid")
 
         with pytest.raises(GeminiClientError):
             GeminiClient(valid_config)
@@ -477,7 +476,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_analyze_empty_hunk(self, mock_genai, valid_config, sample_context):
         """Test analyzing empty hunk."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         empty_hunk = HunkInfo(
@@ -496,7 +495,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_analyze_none_hunk(self, mock_genai, valid_config, sample_context):
         """Test analyzing None hunk."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         result = client.analyze_code_hunk(None, sample_context, "Review")
@@ -505,7 +504,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_analyze_invalid_context(self, mock_genai, valid_config, sample_hunk):
         """Test analyzing with invalid context."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         result = client.analyze_code_hunk(sample_hunk, None, "Review")
@@ -514,7 +513,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_analyze_context_no_pr_details(self, mock_genai, valid_config, sample_hunk):
         """Test analyzing with context missing PR details."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         context = AnalysisContext(
@@ -533,7 +532,7 @@ class TestGeminiClientAdvanced:
         mock_response.text = json.dumps({"reviews": []})
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
 
@@ -558,7 +557,7 @@ class TestGeminiClientAdvanced:
 
         mock_model = Mock()
         mock_model.generate_content.side_effect = Exception("API Error")
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
 
@@ -578,7 +577,7 @@ class TestGeminiClientAdvanced:
         mock_response.candidates = [mock_candidate]
 
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         result = client.analyze_code_hunk(sample_hunk, sample_context, "Review")
@@ -588,7 +587,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_parse_priority_variations(self, mock_genai, valid_config):
         """Test parsing different priority values."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         # Test critical priority
@@ -614,7 +613,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_parse_review_with_all_fields(self, mock_genai, valid_config):
         """Test parsing review with all possible fields."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         data = {
@@ -638,7 +637,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_parse_review_missing_line_number(self, mock_genai, valid_config):
         """Test parsing review with missing line number."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         data = {"reviewComment": "No line number"}
@@ -649,7 +648,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_parse_review_missing_comment(self, mock_genai, valid_config):
         """Test parsing review with missing comment."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         data = {"lineNumber": 10}
@@ -660,7 +659,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_extract_json_various_formats(self, mock_genai, valid_config):
         """Test extracting JSON from various formats."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         # JSON with prefix text
@@ -681,7 +680,7 @@ class TestGeminiClientAdvanced:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_repair_json_various_cases(self, mock_genai, valid_config):
         """Test JSON repair for various broken formats."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         # Missing closing brace
@@ -707,7 +706,7 @@ class TestGeminiClientAdvanced:
         mock_response.text = json.dumps({"reviews": []})
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
 
@@ -726,7 +725,7 @@ class TestGeminiClientAdvanced:
         mock_response.text = ""
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
 
@@ -747,13 +746,13 @@ class TestGeminiClientAdvanced:
         mock_response.candidates = [mock_candidate]
 
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         result = client._generate_content_with_validation("Test prompt")
 
-        # Should still return the text even if blocked
-        assert isinstance(result, str)
+        # A safety-filtered response yields an empty review rather than the filtered text
+        assert result == "[]"
 
 
 class TestGeminiClientContextBuilding:
@@ -780,7 +779,7 @@ class TestGeminiClientContextBuilding:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_context_with_project_context(self, mock_genai, valid_config, sample_hunk):
         """Test context building with project context."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         pr = PRDetails("owner", "repo", 1, "Title", "Desc")
@@ -797,7 +796,7 @@ class TestGeminiClientContextBuilding:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_context_with_change_summary(self, mock_genai, valid_config, sample_hunk):
         """Test context building with change summary."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         pr = PRDetails("owner", "repo", 1, "Title", "Desc")
@@ -814,7 +813,7 @@ class TestGeminiClientContextBuilding:
     @patch("gemini_reviewer.gemini_client.genai")
     def test_context_with_all_changed_files(self, mock_genai, valid_config, sample_hunk):
         """Test context building with all changed files."""
-        mock_genai.GenerativeModel = Mock()
+        mock_genai.Client = Mock()
         client = GeminiClient(valid_config)
 
         pr = PRDetails("owner", "repo", 1, "Title", "Desc")
@@ -845,7 +844,7 @@ class TestGeminiClientFollowUp:
         mock_response.text = json.dumps({"status": "resolved", "newIssues": []})
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
 
@@ -870,7 +869,7 @@ class TestGeminiClientTokenManagement:
         """Test basic token counting."""
         mock_model = Mock()
         mock_model.count_tokens.return_value = Mock(total_tokens=100)
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         if hasattr(client, "count_tokens"):
@@ -881,7 +880,7 @@ class TestGeminiClientTokenManagement:
     def test_estimate_cost(self, mock_genai, valid_config):
         """Test cost estimation."""
         mock_model = Mock()
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         if hasattr(client, "estimate_cost"):
@@ -901,7 +900,7 @@ class TestGeminiClientPromptBuilding:
     def test_build_review_prompt_minimal(self, mock_genai, valid_config):
         """Test building review prompt with minimal input."""
         mock_model = Mock()
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         if hasattr(client, "_build_review_prompt"):
@@ -912,7 +911,7 @@ class TestGeminiClientPromptBuilding:
     def test_build_review_prompt_with_context(self, mock_genai, valid_config):
         """Test building review prompt with full context."""
         mock_model = Mock()
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         context = {"file_path": "test.py", "language": "python", "pr_title": "Add feature"}
@@ -933,7 +932,7 @@ class TestGeminiClientBatchProcessing:
     def test_batch_analyze_empty_list(self, mock_genai, valid_config):
         """Test batch analysis with empty list."""
         mock_model = Mock()
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         if hasattr(client, "batch_analyze"):
@@ -948,7 +947,7 @@ class TestGeminiClientBatchProcessing:
         mock_response.text = '{"comments": []}'
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         if hasattr(client, "batch_analyze"):
@@ -968,7 +967,7 @@ class TestGeminiClientCaching:
     def test_cache_hit(self, mock_genai, valid_config):
         """Test cache hit scenario."""
         mock_model = Mock()
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         if hasattr(client, "_cache") and hasattr(client, "_get_cached"):
@@ -981,7 +980,7 @@ class TestGeminiClientCaching:
     def test_cache_miss(self, mock_genai, valid_config):
         """Test cache miss scenario."""
         mock_model = Mock()
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
 
         client = GeminiClient(valid_config)
         if hasattr(client, "_cache") and hasattr(client, "_get_cached"):
@@ -1003,18 +1002,18 @@ class TestVerifyFindings:
         mock_response.text = text
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
         return GeminiClient(valid_config)
 
     def test_empty_findings_returns_empty(self, valid_config):
         with patch("gemini_reviewer.gemini_client.genai") as mock_genai:
-            mock_genai.GenerativeModel.return_value = Mock()
+            mock_genai.Client.return_value.models = Mock()
             client = GeminiClient(valid_config)
             assert client.verify_findings("some diff", []) == []
 
     def test_no_diff_keeps_all(self, valid_config):
         with patch("gemini_reviewer.gemini_client.genai") as mock_genai:
-            mock_genai.GenerativeModel.return_value = Mock()
+            mock_genai.Client.return_value.models = Mock()
             client = GeminiClient(valid_config)
             assert client.verify_findings("", ["a", "b"]) == [1, 2]
 
@@ -1055,7 +1054,7 @@ class TestRespondToReply:
         mock_response.text = text
         mock_response.candidates = None
         mock_model.generate_content.return_value = mock_response
-        mock_genai.GenerativeModel.return_value = mock_model
+        mock_genai.Client.return_value.models = mock_model
         return GeminiClient(valid_config)
 
     @patch("gemini_reviewer.gemini_client.genai")
